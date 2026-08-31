@@ -1,4 +1,4 @@
-# eta-netctl — a practical way to experiment with your ISP
+# eta-netctl — a practical way to have fun with your ISP
 
 Minimal Android ARM64 cellular networking bundle. It manages the packet rules,
 DNS helper, NFQUEUE process, tethering helper, health checks, and boot lifecycle.
