@@ -1,7 +1,16 @@
-# eta-netctl
+# eta-netctl - best way to have fun w/ isp
 
 Minimal Android ARM64 cellular networking bundle. It manages the packet rules,
 DNS helper, NFQUEUE process, tethering helper, health checks, and boot lifecycle.
+
+
+# DISCLAIMER  
+
+Do not use this for any illegal purposes, "free internet purposes"
+Obey your ISP defined metered limitations, avoid overdrafting  
+This may not work on every APN/ISP, examples are mine case very specific configuration.
+
+> You may consider this exact if you've unlimited/whitelisted secure accessible connection to somewhere.
 
 ## Data flow
 
@@ -154,6 +163,13 @@ Override the default decoy pool when needed:
 eta-netctl restart \
   --fake-sni-pool 'mmg.whatsapp.net,foo.whatsapp.net,media.whatsapp.net'
 ```
+
+
+Do not use these if your ISP allows you to secure connection. These do depend on country, ISP; best practice is to spot few doors where SNI drops certificate without device's, this is feasible on some ISP.
+Moreover government pages can be accessible even when you're out of internet, best case can be unlimited social, unlimited * things that ISP advertises. You can check whether you can use those doors as reliable decoy pool.
+Mine for instance, allows unmetered infinite amount of internet usage on whatsapp; if this is your case few subdomains/SNI w/ confirmations you might end up something like an example on top.
+
+> Why multiple cause to prevent abusing too many packets on single traffic, boarding our possibilities also lowering the suspiciousness...
 
 ## Files
 
