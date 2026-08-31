@@ -1,0 +1,2126 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+TERMUX_PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
+TERMUX_HOME=${ETA_TERMUX_HOME:-/data/data/com.termux/files/home}
+ANDROID_BIN=/system/bin
+# Magisk preserves the caller environment. A normal Termux shell does not
+# always include Android's system tools, while diagnostic ADB launches do.
+# Keep both toolsets available so the same command behaves identically.
+export PATH="$ANDROID_BIN:/system/xbin:$TERMUX_PREFIX/bin:${PATH:-}"
+
+DNSSTREAM="$TERMUX_HOME/.local/bin/eta-dnsstream"
+DNSSTREAM_KEY="$TERMUX_HOME/.config/eta-dnsstream/key"
+TLS_GATEWAY="$TERMUX_HOME/.local/bin/eta-quic-gateway"
+TLS_CERT_DIR="$TERMUX_HOME/.config/eta-tls"
+DIRECT_GATEWAY="$TERMUX_HOME/.local/bin/eta-ciadpi"
+DIRECT_DNS="$TERMUX_HOME/.local/bin/eta-dns-direct"
+NFQ_BIN="/data/adb/eta-net/eta-nfqws"
+NFQ_PID_FILE="/data/local/tmp/eta-nfq.pid"
+TETHER_PROXY_PID_FILE="/data/local/tmp/eta-tether.pid"
+TUN_BIN="/data/adb/eta-net/eta-tun2socks"
+TUN_CONFIG_DNS="/data/adb/eta-net/eta-tun.yml"
+TUN_CONFIG_TLS="/data/adb/eta-net/eta-tun-tls.yml"
+TUN_CONFIG_DIRECT="/data/adb/eta-net/eta-tun-direct.yml"
+TUN_CONFIG="$TUN_CONFIG_DNS"
+TUN_PID_FILE="/data/local/tmp/eta-tun.pid"
+STATE_DIR=${ETA_STATE_DIR:-$TERMUX_HOME/.cache}
+LOCK_DIR="$STATE_DIR/eta-net.lock"
+READY_FILE="$STATE_DIR/eta-net.ready"
+HEALTH_FILE="$STATE_DIR/eta-net.health"
+STACK_FILE="$STATE_DIR/eta-net.stack"
+NFQ_COOLDOWN_FILE="$STATE_DIR/eta-net.nfq-cooldown"
+DNS_SUFFIX=${ETA_DNS_SUFFIX:-}
+SOCKS_PORT=1080
+ROUTE_TABLE=205
+ROUTE_MARK=0x200000
+ROUTE_MARK_MASK=0x200000
+DIRECT_ROUTE_MARK=0x400000
+DIRECT_ROUTE_MARK_MASK=0x400000
+DIRECT_RULE_PREF=10935
+NFQ_RULE_PREF=10936
+TUN_RULE_PREF=10950
+UID_BYPASS_RULE_PREF=10955
+RESOLVER_RULE_PREF=10940
+IPTABLES_CHAIN=ETA_DNSNET_OUT
+IPTABLES_QUIC_CHAIN=ETA_DNSNET_QUIC
+IPTABLES_DNS_CHAIN=ETA_DNSNET_DNS
+IPTABLES_NFQ_CHAIN=ETA_DNSNET_NFQ
+IPTABLES_TETHER_NAT_CHAIN=ETA_DNSNET_TNAT
+IPTABLES_TETHER_INPUT_CHAIN=ETA_DNSNET_TINPUT
+IPTABLES_TETHER_QUIC_CHAIN=ETA_DNSNET_TQUIC
+NFQ_QUEUE=220
+NFQ_ROUTE_MARK=0x10000000
+NFQ_ROUTE_MARK_MASK=0x10000000
+NFQ_BYPASS_MARK=0x40000000
+NFQ_BYPASS_MARK_MASK=0x40000000
+NFQ_PACKET_LIMIT=${ETA_NFQ_PACKET_LIMIT:-12}
+NFQ_COOLDOWN=${ETA_NFQ_COOLDOWN:-300}
+DIRECT_DNS_PORT=15353
+TETHER_PROXY_PORT=${ETA_TETHER_PORT:-18080}
+resolver_spec=${ETA_DNS_SERVERS:-195.175.39.39:53 195.175.39.40:53}
+direct_resolver_spec=${ETA_DIRECT_DNS_SERVERS:-}
+package_spec=${ETA_PACKAGES:-com.reddit.frontpage}
+ROUTE_ALL_APPS=${ETA_ROUTE_ALL_APPS:-1}
+ROUTE_SYSTEM_DNS=${ETA_SYSTEM_DNS:-auto}
+TETHER_MODE=${ETA_TETHER:-1}
+RESTART_TARGET_APPS=${ETA_RESTART_APPS:-1}
+TRANSPORT=${ETA_TRANSPORT:-direct}
+DIRECT_STACK=${ETA_DIRECT_STACK:-auto}
+TLS_REMOTE=${ETA_TLS_REMOTE:-78.191.114.245:443}
+TLS_SNI=${ETA_TLS_SNI:-g.whatsapp.net}
+TLS_CARRIERS=${ETA_TLS_CARRIERS:-4}
+TLS_TCP_BUFFER=${ETA_TLS_BUFFER:-1048576}
+DEFAULT_FAKE_SNI_POOL='mmg.whatsapp.net,foo.whatsapp.net,media.whatsapp.net,a.b.whatsapp.net,g.whatsapp.net'
+DIRECT_FAKE_SNI=${ETA_DIRECT_FAKE_SNI:-mmg.whatsapp.net}
+if [[ -n "${ETA_FAKE_SNI_POOL:-}" ]]; then
+    fake_sni_pool_spec=$ETA_FAKE_SNI_POOL
+elif [[ -n "${ETA_DIRECT_FAKE_SNI+x}" ]]; then
+    fake_sni_pool_spec=$DIRECT_FAKE_SNI
+else
+    fake_sni_pool_spec=$DEFAULT_FAKE_SNI_POOL
+fi
+fake_sni_rule_spec=${ETA_FAKE_SNI_RULES:-}
+DIRECT_FAKE_TTL=${ETA_DIRECT_FAKE_TTL:-8}
+DIRECT_FAKE_POSITION=${ETA_DIRECT_FAKE_POSITION:--1}
+DIRECT_BUFFER=${ETA_DIRECT_BUFFER:-262144}
+DIRECT_MAX_CONNECTIONS=${ETA_DIRECT_MAX_CONNECTIONS:-1024}
+DIRECT_DOH_ENDPOINT=${ETA_DIRECT_DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query;https://dns.quad9.net/dns-query;https://dns.google/dns-query}
+DIRECT_DOH_BOOTSTRAP=${ETA_DIRECT_DOH_BOOTSTRAP:-1.1.1.1:443,1.0.0.1:443;9.9.9.9:443,149.112.112.112:443;8.8.8.8:443,8.8.4.4:443}
+DIRECT_DOH_TIMEOUT=${ETA_DIRECT_DOH_TIMEOUT:-6}
+DIRECT_DOH_ATTEMPT_TIMEOUT=${ETA_DIRECT_DOH_ATTEMPT_TIMEOUT:-1500ms}
+DIRECT_DNS_FALLBACK=${ETA_DIRECT_DNS_FALLBACK:-195.175.39.39:53,195.175.39.40:53,195.175.39.59:53,195.175.39.60:53}
+DIRECT_DNS_FALLBACK_TIMEOUT=${ETA_DIRECT_DNS_FALLBACK_TIMEOUT:-750ms}
+DIRECT_CHECK_HOST=${ETA_DIRECT_CHECK_HOST:-www.google.com}
+DIRECT_CHECK_URL=${ETA_DIRECT_CHECK_URL:-https://www.google.com/generate_204}
+DIRECT_EXTRA_SPEC=${ETA_DIRECT_ARGS:-}
+CARRIER_MODE=${ETA_CARRIER_MODE:-udp}
+TCP_POOL_SIZE=${ETA_TCP_POOL_SIZE:-16}
+UDP_INFLIGHT=${ETA_UDP_INFLIGHT:-16}
+UPSTREAM_WINDOW=${ETA_UPSTREAM_WINDOW:-12}
+DOWNSTREAM_WINDOW=${ETA_DOWNSTREAM_WINDOW:-12}
+RESPONSE_SIZE=${ETA_RESPONSE_SIZE:-1050}
+HEALTH_TIMEOUT=${ETA_HEALTH_TIMEOUT:-30}
+WATCHDOG_INTERVAL=${ETA_WATCHDOG_INTERVAL:-30}
+WATCHDOG_TIMEOUT=${ETA_WATCHDOG_TIMEOUT:-8}
+WATCHDOG_FAILURES=${ETA_WATCHDOG_FAILURES:-3}
+cell_iface=${ETA_CELL_IFACE:-}
+FAKE_SNI_RULE_SPECS=()
+if [[ -n "$fake_sni_rule_spec" ]]; then
+    IFS=';' read -r -a FAKE_SNI_RULE_SPECS <<< "$fake_sni_rule_spec"
+fi
+
+show_help() {
+    printf '%s\n' \
+        'usage: eta-net [options]' \
+        '  --all-apps                 route apps in every Android profile (default)' \
+        '  --packages PKG[,PKG...]    route only these Android packages' \
+        '  --system-dns               route Android system DNS through the server' \
+        '  --no-system-dns            leave Android system DNS on the mobile network' \
+        '  --tether                   share the direct HTTPS/DNS path with hotspot and USB (default)' \
+        '  --no-tether                leave hotspot and USB tethering unchanged' \
+        '  --tether-port N            internal transparent listener (default: 18080)' \
+        '  --transport direct|tls|dns|auto  primary path (default: direct)' \
+        '  --direct-stack auto|nfqueue|tun  direct data path (default: auto)' \
+        '  --fake-sni NAME            use one fake ClientHello SNI; disables the default pool' \
+        '  --fake-sni-pool NAMES      comma-separated decoys; rotate among them' \
+        '  --fake-sni-rule TARGETS=NAME  target domains or IPv4/CIDRs use this decoy; repeatable' \
+        '  --fake-ttl N               fake packet TTL, 1..64 (default: 8)' \
+        '  --fake-position N          fake split offset (default: -1)' \
+        '  --direct-buffer BYTES      ByeDPI buffer, 16384..4194304 (default: 262144)' \
+        '  --direct-max-connections N direct connection limit, 64..8192 (default: 1024)' \
+        '  --nfq-packet-limit N       first TCP packets inspected, 6..32 (default: 12)' \
+        '  --nfq-cooldown SEC         auto fallback duration, 30..3600 (default: 300)' \
+        '  --doh-endpoint URL         local DNS-over-HTTPS endpoint' \
+        '  --doh-bootstrap IP:PORT,.. numeric DoH endpoint addresses' \
+        '  --doh-timeout SEC          timeout for one DoH request, 3..30 (default: 6)' \
+        '  --doh-attempt-timeout DUR  timeout per provider (default: 1500ms)' \
+        '  --dns-fallback IP:PORT,..  ISP DNS last-resort endpoints' \
+        '  --dns-fallback-timeout DUR timeout per ISP DNS endpoint (default: 750ms)' \
+        '  --direct-args STRING       extra ByeDPI arguments (advanced)' \
+        '  --tls-remote IP:PORT       direct TLS gateway (default: 78.191.114.245:443)' \
+        '  --tls-sni NAME             TLS server name (default: g.whatsapp.net)' \
+        '  --tls-carriers N           multiplexed TLS pool, 0..8 (default: 4; 0=legacy)' \
+        '  --tls-buffer BYTES         outer TCP buffer, 65536..8388608 (default: 1048576)' \
+        '  --carrier udp|tcp|auto     carrier selection (default: udp)' \
+        '  --resolvers IP:PORT,...    carrier resolvers' \
+        '  --direct-resolvers LIST    cellular route exceptions; defaults to --resolvers' \
+        '  --udp-inflight N           concurrent DNS/UDP exchanges, 2..64 (default: 16)' \
+        '  --tcp-pool-size N          shared DNS/TCP connections, 1..64 (default: 16)' \
+        '  --upstream-window N        ordered chunks per flow, 1..32 (default: 12)' \
+        '  --downstream-window N      parallel response chunks, 1..32 (default: 12)' \
+        '  --response-size BYTES      DNS response envelope, 512..4096 (default: 1050)' \
+        '  --health-timeout SEC       startup carrier check, 5..120 (default: 30)' \
+        '  --watchdog-interval SEC    full app-path check, 0 or 15..3600 (default: 30)' \
+        '  --watchdog-timeout SEC     watchdog request timeout, 3..30 (default: 8)' \
+        '  --watchdog-failures N      failures before restart, 1..10 (default: 3)' \
+        '  --cell-interface NAME      cellular interface override' \
+        '  --restart-apps             restart package targets after routing' \
+        '  --no-restart-apps          do not restart package targets' \
+        '  -h, --help                 show this help'
+}
+
+while (($#)); do
+    case "$1" in
+    --all-apps)
+        ROUTE_ALL_APPS=1
+        shift
+        ;;
+    --packages)
+        (($# >= 2)) || { printf 'Missing value for --packages.\n' >&2; exit 2; }
+        package_spec=${2//,/ }
+        ROUTE_ALL_APPS=0
+        shift 2
+        ;;
+    --system-dns)
+        ROUTE_SYSTEM_DNS=1
+        shift
+        ;;
+    --no-system-dns)
+        ROUTE_SYSTEM_DNS=0
+        shift
+        ;;
+    --tether)
+        TETHER_MODE=1
+        shift
+        ;;
+    --no-tether)
+        TETHER_MODE=0
+        shift
+        ;;
+    --tether-port)
+        (($# >= 2)) || { printf 'Missing value for --tether-port.\n' >&2; exit 2; }
+        TETHER_PROXY_PORT=$2
+        shift 2
+        ;;
+    --transport)
+        (($# >= 2)) || { printf 'Missing value for --transport.\n' >&2; exit 2; }
+        TRANSPORT=$2
+        shift 2
+        ;;
+    --direct-stack)
+        (($# >= 2)) || { printf 'Missing value for --direct-stack.\n' >&2; exit 2; }
+        DIRECT_STACK=$2
+        shift 2
+        ;;
+    --fake-sni)
+        (($# >= 2)) || { printf 'Missing value for --fake-sni.\n' >&2; exit 2; }
+        DIRECT_FAKE_SNI=$2
+        fake_sni_pool_spec=$2
+        shift 2
+        ;;
+    --fake-sni-pool)
+        (($# >= 2)) || { printf 'Missing value for --fake-sni-pool.\n' >&2; exit 2; }
+        fake_sni_pool_spec=$2
+        shift 2
+        ;;
+    --fake-sni-rule)
+        (($# >= 2)) || { printf 'Missing value for --fake-sni-rule.\n' >&2; exit 2; }
+        FAKE_SNI_RULE_SPECS+=("$2")
+        shift 2
+        ;;
+    --fake-ttl)
+        (($# >= 2)) || { printf 'Missing value for --fake-ttl.\n' >&2; exit 2; }
+        DIRECT_FAKE_TTL=$2
+        shift 2
+        ;;
+    --fake-position)
+        (($# >= 2)) || { printf 'Missing value for --fake-position.\n' >&2; exit 2; }
+        DIRECT_FAKE_POSITION=$2
+        shift 2
+        ;;
+    --direct-buffer)
+        (($# >= 2)) || { printf 'Missing value for --direct-buffer.\n' >&2; exit 2; }
+        DIRECT_BUFFER=$2
+        shift 2
+        ;;
+    --direct-max-connections)
+        (($# >= 2)) || { printf 'Missing value for --direct-max-connections.\n' >&2; exit 2; }
+        DIRECT_MAX_CONNECTIONS=$2
+        shift 2
+        ;;
+    --nfq-packet-limit)
+        (($# >= 2)) || { printf 'Missing value for --nfq-packet-limit.\n' >&2; exit 2; }
+        NFQ_PACKET_LIMIT=$2
+        shift 2
+        ;;
+    --nfq-cooldown)
+        (($# >= 2)) || { printf 'Missing value for --nfq-cooldown.\n' >&2; exit 2; }
+        NFQ_COOLDOWN=$2
+        shift 2
+        ;;
+    --doh-endpoint)
+        (($# >= 2)) || { printf 'Missing value for --doh-endpoint.\n' >&2; exit 2; }
+        DIRECT_DOH_ENDPOINT=$2
+        shift 2
+        ;;
+    --doh-bootstrap)
+        (($# >= 2)) || { printf 'Missing value for --doh-bootstrap.\n' >&2; exit 2; }
+        DIRECT_DOH_BOOTSTRAP=$2
+        shift 2
+        ;;
+    --doh-timeout)
+        (($# >= 2)) || { printf 'Missing value for --doh-timeout.\n' >&2; exit 2; }
+        DIRECT_DOH_TIMEOUT=$2
+        shift 2
+        ;;
+    --doh-attempt-timeout)
+        (($# >= 2)) || { printf 'Missing value for --doh-attempt-timeout.\n' >&2; exit 2; }
+        DIRECT_DOH_ATTEMPT_TIMEOUT=$2
+        shift 2
+        ;;
+    --dns-fallback)
+        (($# >= 2)) || { printf 'Missing value for --dns-fallback.\n' >&2; exit 2; }
+        DIRECT_DNS_FALLBACK=$2
+        shift 2
+        ;;
+    --dns-fallback-timeout)
+        (($# >= 2)) || { printf 'Missing value for --dns-fallback-timeout.\n' >&2; exit 2; }
+        DIRECT_DNS_FALLBACK_TIMEOUT=$2
+        shift 2
+        ;;
+    --direct-args)
+        (($# >= 2)) || { printf 'Missing value for --direct-args.\n' >&2; exit 2; }
+        DIRECT_EXTRA_SPEC=$2
+        shift 2
+        ;;
+    --tls-remote)
+        (($# >= 2)) || { printf 'Missing value for --tls-remote.\n' >&2; exit 2; }
+        TLS_REMOTE=$2
+        shift 2
+        ;;
+    --tls-sni)
+        (($# >= 2)) || { printf 'Missing value for --tls-sni.\n' >&2; exit 2; }
+        TLS_SNI=$2
+        shift 2
+        ;;
+    --tls-carriers)
+        (($# >= 2)) || { printf 'Missing value for --tls-carriers.\n' >&2; exit 2; }
+        TLS_CARRIERS=$2
+        shift 2
+        ;;
+    --tls-buffer)
+        (($# >= 2)) || { printf 'Missing value for --tls-buffer.\n' >&2; exit 2; }
+        TLS_TCP_BUFFER=$2
+        shift 2
+        ;;
+    --carrier)
+        (($# >= 2)) || { printf 'Missing value for --carrier.\n' >&2; exit 2; }
+        CARRIER_MODE=$2
+        shift 2
+        ;;
+    --resolvers)
+        (($# >= 2)) || { printf 'Missing value for --resolvers.\n' >&2; exit 2; }
+        resolver_spec=${2//,/ }
+        shift 2
+        ;;
+    --direct-resolvers)
+        (($# >= 2)) || { printf 'Missing value for --direct-resolvers.\n' >&2; exit 2; }
+        direct_resolver_spec=${2//,/ }
+        shift 2
+        ;;
+    --udp-inflight)
+        (($# >= 2)) || { printf 'Missing value for --udp-inflight.\n' >&2; exit 2; }
+        UDP_INFLIGHT=$2
+        shift 2
+        ;;
+    --tcp-pool-size)
+        (($# >= 2)) || { printf 'Missing value for --tcp-pool-size.\n' >&2; exit 2; }
+        TCP_POOL_SIZE=$2
+        shift 2
+        ;;
+    --upstream-window)
+        (($# >= 2)) || { printf 'Missing value for --upstream-window.\n' >&2; exit 2; }
+        UPSTREAM_WINDOW=$2
+        shift 2
+        ;;
+    --health-timeout)
+        (($# >= 2)) || { printf 'Missing value for --health-timeout.\n' >&2; exit 2; }
+        HEALTH_TIMEOUT=$2
+        shift 2
+        ;;
+    --watchdog-interval)
+        (($# >= 2)) || { printf 'Missing value for --watchdog-interval.\n' >&2; exit 2; }
+        WATCHDOG_INTERVAL=$2
+        shift 2
+        ;;
+    --watchdog-timeout)
+        (($# >= 2)) || { printf 'Missing value for --watchdog-timeout.\n' >&2; exit 2; }
+        WATCHDOG_TIMEOUT=$2
+        shift 2
+        ;;
+    --watchdog-failures)
+        (($# >= 2)) || { printf 'Missing value for --watchdog-failures.\n' >&2; exit 2; }
+        WATCHDOG_FAILURES=$2
+        shift 2
+        ;;
+    --downstream-window)
+        (($# >= 2)) || { printf 'Missing value for --downstream-window.\n' >&2; exit 2; }
+        DOWNSTREAM_WINDOW=$2
+        shift 2
+        ;;
+    --response-size)
+        (($# >= 2)) || { printf 'Missing value for --response-size.\n' >&2; exit 2; }
+        RESPONSE_SIZE=$2
+        shift 2
+        ;;
+    --cell-interface)
+        (($# >= 2)) || { printf 'Missing value for --cell-interface.\n' >&2; exit 2; }
+        cell_iface=$2
+        shift 2
+        ;;
+    --restart-apps)
+        RESTART_TARGET_APPS=1
+        shift
+        ;;
+    --no-restart-apps)
+        RESTART_TARGET_APPS=0
+        shift
+        ;;
+    -h|--help)
+        show_help
+        exit 0
+        ;;
+    *)
+        printf 'Unknown option: %s\n' "$1" >&2
+        show_help >&2
+        exit 2
+        ;;
+    esac
+done
+
+# Keep carrier traffic on its explicit cellular exceptions and away from the
+# DNS servers Android received from the mobile network.
+resolver_spec=${resolver_spec//,/ }
+direct_resolver_spec=${direct_resolver_spec//,/ }
+package_spec=${package_spec//,/ }
+read -r -a RESOLVERS <<< "$resolver_spec"
+if [[ -n "$direct_resolver_spec" ]]; then
+    read -r -a DIRECT_RESOLVERS <<< "$direct_resolver_spec"
+else
+    DIRECT_RESOLVERS=()
+fi
+fallback_resolver_spec=${DIRECT_DNS_FALLBACK//,/ }
+read -r -a DIRECT_FALLBACK_RESOLVERS <<< "$fallback_resolver_spec"
+read -r -a TARGET_PACKAGES <<< "$package_spec"
+read -r -a DIRECT_EXTRA_ARGS <<< "$DIRECT_EXTRA_SPEC"
+
+valid_resolver() {
+    local value=$1 address port octet
+    local -a octets
+    [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$ ]] || return 1
+    address=${value%:*}
+    port=${value##*:}
+    ((10#$port >= 1 && 10#$port <= 65535)) || return 1
+    IFS=. read -r -a octets <<< "$address"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+valid_domain_name() {
+    local value=$1 label
+    local -a labels
+    [[ ${#value} -ge 1 && ${#value} -le 253 && "$value" =~ ^[A-Za-z0-9.-]+$ && "$value" != *".."* ]] || return 1
+    IFS=. read -r -a labels <<< "$value"
+    for label in "${labels[@]}"; do
+        [[ ${#label} -ge 1 && ${#label} -le 63 && "$label" != -* && "$label" != *- ]] || return 1
+    done
+}
+
+valid_ipv4_selector() {
+    local value=$1 address=$1 prefix=32 octet
+    local -a octets
+    if [[ "$value" == */* ]]; then
+        address=${value%/*}
+        prefix=${value##*/}
+    fi
+    [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && "$prefix" =~ ^[0-9]+$ ]] || return 1
+    ((10#$prefix >= 1 && 10#$prefix <= 32)) || return 1
+    IFS=. read -r -a octets <<< "$address"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+normalize_fake_sni_pool() {
+    local candidate existing duplicate
+    local -a candidates
+    FAKE_SNI_POOL=()
+    IFS=, read -r -a candidates <<< "$fake_sni_pool_spec"
+    ((${#candidates[@]} >= 1 && ${#candidates[@]} <= 8)) || {
+        printf 'The fake SNI pool must contain 1 to 8 names.\n' >&2
+        return 1
+    }
+    for candidate in "${candidates[@]}"; do
+        valid_domain_name "$candidate" || {
+            printf 'Invalid fake SNI pool name: %s\n' "$candidate" >&2
+            return 1
+        }
+        duplicate=0
+        for existing in "${FAKE_SNI_POOL[@]}"; do
+            if [[ "$existing" == "$candidate" ]]; then
+                duplicate=1
+                break
+            fi
+        done
+        ((duplicate)) || FAKE_SNI_POOL+=("$candidate")
+    done
+    DIRECT_FAKE_SNI=${FAKE_SNI_POOL[0]}
+    ACTIVE_FAKE_SNI=${FAKE_SNI_POOL[RANDOM % ${#FAKE_SNI_POOL[@]}]}
+}
+
+normalize_fake_sni_rules() {
+    local spec selectors decoy selector rule_type selector_type normalized
+    local -a selector_values
+    FAKE_RULE_TYPES=()
+    FAKE_RULE_TARGETS=()
+    FAKE_RULE_DECOYS=()
+    ((${#FAKE_SNI_RULE_SPECS[@]} <= 16)) || {
+        printf 'At most 16 --fake-sni-rule profiles are supported.\n' >&2
+        return 1
+    }
+    for spec in "${FAKE_SNI_RULE_SPECS[@]}"; do
+        [[ "$spec" == *=* && "$spec" != =* && "$spec" != *= ]] || {
+            printf 'Invalid fake SNI rule: %s\n' "$spec" >&2
+            return 1
+        }
+        selectors=${spec%%=*}
+        decoy=${spec#*=}
+        valid_domain_name "$decoy" || {
+            printf 'Invalid fake SNI rule decoy: %s\n' "$decoy" >&2
+            return 1
+        }
+        IFS=, read -r -a selector_values <<< "$selectors"
+        ((${#selector_values[@]} > 0)) || return 1
+        rule_type=""
+        normalized=""
+        for selector in "${selector_values[@]}"; do
+            if valid_ipv4_selector "$selector"; then
+                selector_type=ip
+            elif valid_domain_name "$selector"; then
+                selector_type=domain
+            else
+                printf 'Invalid fake SNI rule target: %s\n' "$selector" >&2
+                return 1
+            fi
+            if [[ -n "$rule_type" && "$selector_type" != "$rule_type" ]]; then
+                printf 'Do not mix domain and IP targets in one fake SNI rule: %s\n' "$spec" >&2
+                return 1
+            fi
+            rule_type=$selector_type
+            normalized+="${selector},"
+        done
+        FAKE_RULE_TYPES+=("$rule_type")
+        FAKE_RULE_TARGETS+=("${normalized%,}")
+        FAKE_RULE_DECOYS+=("$decoy")
+    done
+}
+
+normalize_inputs() {
+    local value
+    local -a carrier=() direct=() packages=()
+    declare -A carrier_seen=() direct_seen=() package_seen=()
+    for value in "${RESOLVERS[@]}"; do
+        valid_resolver "$value" || { printf 'Invalid resolver: %s\n' "$value" >&2; return 1; }
+        [[ -n "${carrier_seen[$value]:-}" ]] && continue
+        carrier_seen[$value]=1
+        carrier+=("$value")
+    done
+    ((${#carrier[@]} > 0)) || { printf 'At least one carrier resolver is required.\n' >&2; return 1; }
+    for value in "${carrier[@]}" "${DIRECT_RESOLVERS[@]}" "${DIRECT_FALLBACK_RESOLVERS[@]}"; do
+        valid_resolver "$value" || { printf 'Invalid direct resolver: %s\n' "$value" >&2; return 1; }
+        [[ -n "${direct_seen[$value]:-}" ]] && continue
+        direct_seen[$value]=1
+        direct+=("$value")
+    done
+    ((${#direct[@]} <= TUN_RULE_PREF - RESOLVER_RULE_PREF)) || {
+        printf 'At most %s direct resolvers are supported.\n' "$((TUN_RULE_PREF - RESOLVER_RULE_PREF))" >&2
+        return 1
+    }
+    for value in "${TARGET_PACKAGES[@]}"; do
+        [[ -n "${package_seen[$value]:-}" ]] && continue
+        package_seen[$value]=1
+        packages+=("$value")
+    done
+    RESOLVERS=("${carrier[@]}")
+    DIRECT_RESOLVERS=("${direct[@]}")
+    TARGET_PACKAGES=("${packages[@]}")
+}
+
+transport_pid=""
+dns_proxy_pid=""
+transport_kind=""
+transport_mode=""
+direct_stack=""
+tun_launcher_pid=""
+nfq_launcher_pid=""
+nfq_pid=""
+tether_launcher_pid=""
+tether_pid=""
+resolver_routes_installed=0
+direct_route_installed=0
+watchdog_uid=""
+tun_started=0
+nfq_started=0
+tether_started=0
+tether_active=0
+lock_held=0
+cleanup_done=0
+network_cleanup_owned=0
+wake_lock_held=0
+
+resolver_rules() {
+    local action=$1
+    local app_uid resolver resolver_ip route_pref route_command=""
+    app_uid=$(id -u)
+    route_pref=$RESOLVER_RULE_PREF
+    for resolver in "${DIRECT_RESOLVERS[@]}"; do
+        resolver_ip=${resolver%:*}
+        route_command+="while ip -4 rule del pref ${route_pref} 2>/dev/null; do :; done; "
+        if [[ "$action" == add ]]; then
+            route_command+="ip -4 rule add pref ${route_pref} to ${resolver_ip}/32 uidrange ${app_uid}-${app_uid} lookup ${cell_iface} || exit 1; "
+        fi
+        ((route_pref++))
+    done
+    route_command+="ip -4 route flush cache"
+    su -c "$route_command"
+}
+
+install_resolver_routes() {
+    local resolver_ip route_output
+    if [[ -z "$cell_iface" ]]; then
+        resolver_ip=${RESOLVERS[0]%:*}
+        route_output=$(su -c "ip -4 route get ${resolver_ip}" 2>/dev/null || true)
+        cell_iface=$("$TERMUX_PREFIX/bin/awk" '{ for (field=1; field<NF; field++) if ($field == "dev" && $(field+1) ~ /^rmnet[0-9]+$/) { print $(field+1); exit } }' <<<"$route_output")
+    fi
+    if [[ -z "$cell_iface" ]]; then
+        cell_iface=$(su -c 'ip -4 route show table all' 2>/dev/null | "$TERMUX_PREFIX/bin/awk" '$1 == "default" { for (field=1; field<NF; field++) if ($field == "dev" && $(field+1) ~ /^rmnet[0-9]+$/) { print $(field+1); exit } }')
+    fi
+    if [[ ! "$cell_iface" =~ ^rmnet[0-9]+$ ]]; then
+        printf 'Cellular interface not found. Set ETA_CELL_IFACE.\n' >&2
+        return 1
+    fi
+    resolver_routes_installed=1
+    if ! resolver_rules add; then
+        if resolver_rules del >/dev/null 2>&1; then
+            resolver_routes_installed=0
+        fi
+        return 1
+    fi
+    printf 'Cellular route: %s\n' "$cell_iface"
+}
+
+install_direct_route() {
+    if ! su -c "
+        while ip -4 rule del pref ${DIRECT_RULE_PREF} 2>/dev/null; do :; done
+        while ip -4 rule del pref ${NFQ_RULE_PREF} 2>/dev/null; do :; done
+        ip -4 rule add pref ${DIRECT_RULE_PREF} fwmark ${DIRECT_ROUTE_MARK}/${DIRECT_ROUTE_MARK_MASK} lookup ${cell_iface} || exit 1
+        ip -4 rule add pref ${NFQ_RULE_PREF} fwmark ${NFQ_ROUTE_MARK}/${NFQ_ROUTE_MARK_MASK} lookup ${cell_iface} || exit 1
+        ip -4 route flush cache
+    "; then
+        return 1
+    fi
+    direct_route_installed=1
+}
+
+clear_direct_route() {
+    ((direct_route_installed)) || return 0
+    if su -c "while ip -4 rule del pref ${DIRECT_RULE_PREF} 2>/dev/null; do :; done; while ip -4 rule del pref ${NFQ_RULE_PREF} 2>/dev/null; do :; done; ip -4 route flush cache" \
+        >/dev/null 2>&1; then
+        direct_route_installed=0
+        return 0
+    fi
+    return 1
+}
+
+clear_uid_bypass_rules() {
+    su -c "while ip -4 rule del pref ${UID_BYPASS_RULE_PREF} 2>/dev/null; do :; done; ip -4 route flush cache" \
+        >/dev/null 2>&1
+}
+
+clear_packet_policy() {
+    local clear_failed=0
+    clear_uid_bypass_rules || clear_failed=1
+    if ! su -c "
+        while iptables -w 5 -t nat -D PREROUTING -j ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t nat -F ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t nat -X ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t filter -D INPUT -j ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t filter -F ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -X ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t filter -D FORWARD -j ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t filter -F ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -X ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t mangle -D POSTROUTING -j ${IPTABLES_NFQ_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t mangle -F ${IPTABLES_NFQ_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t mangle -X ${IPTABLES_NFQ_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t mangle -D OUTPUT -j ${IPTABLES_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t mangle -F ${IPTABLES_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t mangle -X ${IPTABLES_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t filter -D OUTPUT -j ${IPTABLES_QUIC_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t filter -F ${IPTABLES_QUIC_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -X ${IPTABLES_QUIC_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t nat -D OUTPUT -j ${IPTABLES_DNS_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t nat -F ${IPTABLES_DNS_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t nat -X ${IPTABLES_DNS_CHAIN} 2>/dev/null || true
+        while ip6tables -w 5 -t mangle -D OUTPUT -j ${IPTABLES_CHAIN} 2>/dev/null; do :; done
+        ip6tables -w 5 -t mangle -F ${IPTABLES_CHAIN} 2>/dev/null || true
+        ip6tables -w 5 -t mangle -X ${IPTABLES_CHAIN} 2>/dev/null || true
+        while ip6tables -w 5 -t filter -D OUTPUT -j ${IPTABLES_QUIC_CHAIN} 2>/dev/null; do :; done
+        ip6tables -w 5 -t filter -F ${IPTABLES_QUIC_CHAIN} 2>/dev/null || true
+        ip6tables -w 5 -t filter -X ${IPTABLES_QUIC_CHAIN} 2>/dev/null || true
+        while ip6tables -w 5 -t nat -D OUTPUT -j ${IPTABLES_DNS_CHAIN} 2>/dev/null; do :; done
+        ip6tables -w 5 -t nat -F ${IPTABLES_DNS_CHAIN} 2>/dev/null || true
+        ip6tables -w 5 -t nat -X ${IPTABLES_DNS_CHAIN} 2>/dev/null || true
+        while ip -4 rule del pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} 2>/dev/null; do :; done
+        while ip -6 rule del pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} 2>/dev/null; do :; done
+        ip -4 route flush table ${ROUTE_TABLE} 2>/dev/null || true
+        ip -6 route flush table ${ROUTE_TABLE} 2>/dev/null || true
+        ip -4 route flush cache
+        ip -6 route flush cache
+    " >/dev/null 2>&1; then
+        clear_failed=1
+    fi
+    return "$clear_failed"
+}
+
+current_android_user() {
+    local caller_uid
+    if [[ -n "${ETA_ANDROID_USER:-}" ]]; then
+        [[ "$ETA_ANDROID_USER" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' "$ETA_ANDROID_USER"
+        return
+    fi
+    caller_uid=$(id -u) || return 1
+    [[ "$caller_uid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$((caller_uid / 100000))"
+}
+
+route_targets() {
+    local android_user android_users networkstack_uid package package_line package_uid user_id uid_start uid_end
+    if [[ "$ROUTE_ALL_APPS" == 1 ]]; then
+        if [[ -n "${ETA_ANDROID_USER:-}" ]]; then
+            android_users=$(current_android_user)
+        else
+            android_users=$(su -c "${ANDROID_BIN}/cmd user list" 2>/dev/null | \
+                "$TERMUX_PREFIX/bin/awk" -F'[{:]' '/UserInfo\{[0-9]+:/ { print $2 }')
+        fi
+        if [[ -z "$android_users" ]]; then
+            android_users=$(current_android_user)
+        fi
+        while read -r user_id; do
+            [[ "$user_id" =~ ^[0-9]+$ ]] || continue
+            # Connectivity validation is performed by the modular NetworkStack,
+            # whose app-id (1073) is below Android's regular application range.
+            # If it misses the direct path, Android removes VALIDATED from the
+            # cellular network even while ordinary application traffic works.
+            networkstack_uid=$((user_id * 100000 + 1073))
+            printf '%s %s networkstack-user-%s\n' "$networkstack_uid" "$networkstack_uid" "$user_id"
+            uid_start=$((user_id * 100000 + 10000))
+            uid_end=$((user_id * 100000 + 99999))
+            printf '%s %s all-apps-user-%s\n' "$uid_start" "$uid_end" "$user_id"
+        done <<<"$android_users"
+        return
+    fi
+
+    android_user=$(current_android_user)
+    if [[ ! "$android_user" =~ ^[0-9]+$ ]]; then
+        printf 'Unable to determine the active Android user.\n' >&2
+        return 1
+    fi
+    for package in "${TARGET_PACKAGES[@]}"; do
+        if [[ ! "$package" =~ ^[A-Za-z0-9._]+$ ]]; then
+            printf 'Invalid package name: %s\n' "$package" >&2
+            return 1
+        fi
+        package_line=$(su -c "${ANDROID_BIN}/cmd package list packages -U --user ${android_user} ${package}" 2>/dev/null | "$TERMUX_PREFIX/bin/awk" -v wanted="package:${package}" '$1 == wanted { print; exit }')
+        package_uid=${package_line##*uid:}
+        if [[ ! "$package_uid" =~ ^[0-9]+$ ]] || ((package_uid < 10000)); then
+            printf 'Package not installed for user %s: %s\n' "$android_user" "$package" >&2
+            return 1
+        fi
+        printf '%s %s %s\n' "$package_uid" "$package_uid" "$package"
+    done
+}
+
+install_packet_policy() {
+    local uid_start uid_end label resolver resolver_ip dns_helper_uid tether_subnet
+    local rules4="" rules6="" dns_bypass4="" dns_rules4="" bypass_rules="" route_labels=""
+    local ipv4_routes="" ipv6_routes="" nfq_setup="" tether_setup=""
+    while read -r uid_start uid_end label; do
+        [[ "$uid_start" =~ ^[0-9]+$ && "$uid_end" =~ ^[0-9]+$ ]] || continue
+        if [[ "$transport_kind" == direct && "$direct_stack" == nfqueue ]]; then
+            rules4+="iptables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p tcp --dport 443 -m owner --uid-owner ${uid_start}-${uid_end} -j MARK --or-mark ${NFQ_ROUTE_MARK} || exit 1; "
+        else
+            rules4+="iptables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p tcp -m owner --uid-owner ${uid_start}-${uid_end} -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+        fi
+        rules4+="iptables -w 5 -t filter -A ${IPTABLES_QUIC_CHAIN} -p udp --dport 443 -m owner --uid-owner ${uid_start}-${uid_end} -j REJECT --reject-with icmp-port-unreachable || exit 1; "
+        if [[ "$transport_kind" == direct ]]; then
+            rules6+="ip6tables -w 5 -t filter -A ${IPTABLES_QUIC_CHAIN} -p tcp -m owner --uid-owner ${uid_start}-${uid_end} -j REJECT --reject-with tcp-reset || exit 1; "
+        else
+            rules6+="ip6tables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p tcp -m owner --uid-owner ${uid_start}-${uid_end} -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+        fi
+        rules6+="ip6tables -w 5 -t filter -A ${IPTABLES_QUIC_CHAIN} -p udp --dport 443 -m owner --uid-owner ${uid_start}-${uid_end} -j REJECT --reject-with icmp6-port-unreachable || exit 1; "
+        if [[ "$transport_kind" == direct ]]; then
+            dns_rules4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p udp --dport 53 -m owner --uid-owner ${uid_start}-${uid_end} -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+            dns_rules4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p tcp --dport 53 -m owner --uid-owner ${uid_start}-${uid_end} -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+        else
+            rules4+="iptables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p udp ! -d 127.0.0.0/8 --dport 53 -m owner --uid-owner ${uid_start}-${uid_end} -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+            rules6+="ip6tables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p udp ! -d ::1/128 --dport 53 -m owner --uid-owner ${uid_start}-${uid_end} -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+        fi
+        bypass_rules+="ip -4 rule add pref ${UID_BYPASS_RULE_PREF} uidrange ${uid_start}-${uid_end} lookup ${cell_iface} || exit 1; "
+        route_labels+="${label} "
+    done <<<"$routing_targets"
+
+    if [[ "$transport_kind" == direct ]]; then
+        dns_helper_uid=$(id -u)
+        for resolver in "${DIRECT_FALLBACK_RESOLVERS[@]}"; do
+            resolver_ip=${resolver%:*}
+            dns_bypass4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p udp -d ${resolver_ip}/32 --dport 53 -m owner --uid-owner ${dns_helper_uid} -j RETURN || exit 1; "
+            dns_bypass4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p tcp -d ${resolver_ip}/32 --dport 53 -m owner --uid-owner ${dns_helper_uid} -j RETURN || exit 1; "
+        done
+    fi
+
+    if [[ "$ROUTE_SYSTEM_DNS" == 1 ]]; then
+        # Android's resolver daemon opens upstream sockets as UID 0. Route only
+        # its DNS traffic; the carrier used by eta-dnsstream keeps the earlier
+        # per-resolver policy-rule exception and therefore cannot loop into eta0.
+        if [[ "$transport_kind" == direct ]]; then
+            dns_rules4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p udp --dport 53 -m owner --uid-owner 0 -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+            dns_rules4+="iptables -w 5 -t nat -A ${IPTABLES_DNS_CHAIN} -p tcp --dport 53 -m owner --uid-owner 0 -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+        else
+            rules4+="iptables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p udp ! -d 127.0.0.0/8 --dport 53 -m owner --uid-owner 0 -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+            rules4+="iptables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p tcp ! -d 127.0.0.0/8 --dport 53 -m owner --uid-owner 0 -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+            rules6+="ip6tables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p udp ! -d ::1/128 --dport 53 -m owner --uid-owner 0 -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+            rules6+="ip6tables -w 5 -t mangle -A ${IPTABLES_CHAIN} -p tcp ! -d ::1/128 --dport 53 -m owner --uid-owner 0 -j MARK --or-mark ${ROUTE_MARK} || exit 1; "
+        fi
+    fi
+
+    if [[ -z "$rules4" || -z "$rules6" ]]; then
+        printf 'No Android application UID ranges found.\n' >&2
+        return 1
+    fi
+
+    if [[ "$transport_kind" != direct || "$direct_stack" == tun ]]; then
+        ipv4_routes="ip -4 route replace unreachable default metric 32767 table ${ROUTE_TABLE} || exit 1; "
+        ipv4_routes+="ip -4 route replace default dev eta0 metric 1 table ${ROUTE_TABLE} || exit 1; "
+        ipv4_routes+="ip -4 rule add pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} || exit 1; "
+    fi
+
+    if [[ "$transport_kind" != direct ]]; then
+        ipv6_routes="ip -6 route replace unreachable default metric 32767 table ${ROUTE_TABLE} || exit 1; "
+        ipv6_routes+="ip -6 route replace default dev eta0 metric 1 table ${ROUTE_TABLE} || exit 1; "
+        ipv6_routes+="ip -6 rule add pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} || exit 1; "
+    fi
+
+    if [[ "$transport_kind" == direct && "$direct_stack" == nfqueue ]]; then
+        nfq_setup="iptables -w 5 -t mangle -N ${IPTABLES_NFQ_CHAIN} 2>/dev/null || iptables -w 5 -t mangle -F ${IPTABLES_NFQ_CHAIN} || exit 1; "
+        nfq_setup+="iptables -w 5 -t mangle -A ${IPTABLES_NFQ_CHAIN} -o ${cell_iface} -p tcp --dport 443 -m mark --mark ${NFQ_ROUTE_MARK}/${NFQ_ROUTE_MARK_MASK} -m mark ! --mark ${NFQ_BYPASS_MARK}/${NFQ_BYPASS_MARK_MASK} -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:${NFQ_PACKET_LIMIT} -j NFQUEUE --queue-num ${NFQ_QUEUE} --queue-bypass || exit 1; "
+        nfq_setup+="iptables -w 5 -t mangle -I POSTROUTING 1 -j ${IPTABLES_NFQ_CHAIN} || exit 1; "
+    fi
+
+    if ((tether_active)); then
+        tether_setup="iptables -w 5 -t nat -N ${IPTABLES_TETHER_NAT_CHAIN} || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -N ${IPTABLES_TETHER_INPUT_CHAIN} || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -N ${IPTABLES_TETHER_QUIC_CHAIN} || exit 1; "
+        tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} -i ${cell_iface} -j RETURN || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} -i lo -j RETURN || exit 1; "
+        for tether_subnet in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p udp --dport 53 -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+            tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p tcp --dport 53 -j REDIRECT --to-ports ${DIRECT_DNS_PORT} || exit 1; "
+            tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p udp --dport ${DIRECT_DNS_PORT} -j ACCEPT || exit 1; "
+            tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p tcp --dport ${DIRECT_DNS_PORT} -j ACCEPT || exit 1; "
+            tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p tcp --dport ${TETHER_PROXY_PORT} -j ACCEPT || exit 1; "
+            tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_QUIC_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p udp -m multiport --dports 443,853 -j REJECT --reject-with icmp-port-unreachable || exit 1; "
+        done
+        tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} -d 10.0.0.0/8 -j RETURN || exit 1; "
+        tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} -d 172.16.0.0/12 -j RETURN || exit 1; "
+        tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} -d 192.168.0.0/16 -j RETURN || exit 1; "
+        for tether_subnet in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            tether_setup+="iptables -w 5 -t nat -A ${IPTABLES_TETHER_NAT_CHAIN} ! -i ${cell_iface} -s ${tether_subnet} -p tcp -m multiport --dports 443,853 -j REDIRECT --to-ports ${TETHER_PROXY_PORT} || exit 1; "
+        done
+        tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} -p udp --dport ${DIRECT_DNS_PORT} -j REJECT --reject-with icmp-port-unreachable || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -A ${IPTABLES_TETHER_INPUT_CHAIN} -p tcp -m multiport --dports ${DIRECT_DNS_PORT},${TETHER_PROXY_PORT} -j REJECT --reject-with tcp-reset || exit 1; "
+        tether_setup+="iptables -w 5 -t nat -I PREROUTING 1 -j ${IPTABLES_TETHER_NAT_CHAIN} || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -I INPUT 1 -j ${IPTABLES_TETHER_INPUT_CHAIN} || exit 1; "
+        tether_setup+="iptables -w 5 -t filter -I FORWARD 1 -j ${IPTABLES_TETHER_QUIC_CHAIN} || exit 1; "
+    fi
+
+    if ! su -c "
+        while iptables -w 5 -t nat -D PREROUTING -j ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null; do :; done
+        while iptables -w 5 -t filter -D INPUT -j ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null; do :; done
+        while iptables -w 5 -t filter -D FORWARD -j ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t nat -F ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t nat -X ${IPTABLES_TETHER_NAT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -F ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -X ${IPTABLES_TETHER_INPUT_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -F ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t filter -X ${IPTABLES_TETHER_QUIC_CHAIN} 2>/dev/null || true
+        while iptables -w 5 -t mangle -D OUTPUT -j ${IPTABLES_CHAIN} 2>/dev/null; do :; done
+        while ip6tables -w 5 -t mangle -D OUTPUT -j ${IPTABLES_CHAIN} 2>/dev/null; do :; done
+        while iptables -w 5 -t filter -D OUTPUT -j ${IPTABLES_QUIC_CHAIN} 2>/dev/null; do :; done
+        while ip6tables -w 5 -t filter -D OUTPUT -j ${IPTABLES_QUIC_CHAIN} 2>/dev/null; do :; done
+        while iptables -w 5 -t nat -D OUTPUT -j ${IPTABLES_DNS_CHAIN} 2>/dev/null; do :; done
+        while iptables -w 5 -t mangle -D POSTROUTING -j ${IPTABLES_NFQ_CHAIN} 2>/dev/null; do :; done
+        iptables -w 5 -t mangle -F ${IPTABLES_NFQ_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t mangle -X ${IPTABLES_NFQ_CHAIN} 2>/dev/null || true
+        iptables -w 5 -t mangle -N ${IPTABLES_CHAIN} 2>/dev/null || iptables -w 5 -t mangle -F ${IPTABLES_CHAIN} || exit 1
+        ip6tables -w 5 -t mangle -N ${IPTABLES_CHAIN} 2>/dev/null || ip6tables -w 5 -t mangle -F ${IPTABLES_CHAIN} || exit 1
+        iptables -w 5 -t filter -N ${IPTABLES_QUIC_CHAIN} 2>/dev/null || iptables -w 5 -t filter -F ${IPTABLES_QUIC_CHAIN} || exit 1
+        ip6tables -w 5 -t filter -N ${IPTABLES_QUIC_CHAIN} 2>/dev/null || ip6tables -w 5 -t filter -F ${IPTABLES_QUIC_CHAIN} || exit 1
+        iptables -w 5 -t nat -N ${IPTABLES_DNS_CHAIN} 2>/dev/null || iptables -w 5 -t nat -F ${IPTABLES_DNS_CHAIN} || exit 1
+        ${rules4}
+        ${rules6}
+        ${dns_bypass4}
+        ${dns_rules4}
+        ip -4 route flush table ${ROUTE_TABLE} 2>/dev/null || true
+        ip -6 route flush table ${ROUTE_TABLE} 2>/dev/null || true
+        while ip -4 rule del pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} 2>/dev/null; do :; done
+        while ip -6 rule del pref ${TUN_RULE_PREF} fwmark ${ROUTE_MARK}/${ROUTE_MARK_MASK} lookup ${ROUTE_TABLE} 2>/dev/null; do :; done
+        ${ipv4_routes}
+        ${ipv6_routes}
+        ${bypass_rules}
+        iptables -w 5 -t mangle -I OUTPUT 1 -j ${IPTABLES_CHAIN} || exit 1
+        ip6tables -w 5 -t mangle -I OUTPUT 1 -j ${IPTABLES_CHAIN} || exit 1
+        iptables -w 5 -t filter -I OUTPUT 1 -j ${IPTABLES_QUIC_CHAIN} || exit 1
+        ip6tables -w 5 -t filter -I OUTPUT 1 -j ${IPTABLES_QUIC_CHAIN} || exit 1
+        iptables -w 5 -t nat -I OUTPUT 1 -j ${IPTABLES_DNS_CHAIN} || exit 1
+        ${nfq_setup}
+        ${tether_setup}
+        ip -4 route flush cache
+        ip -6 route flush cache
+    "; then
+        return 1
+    fi
+    printf 'Routed target: %s\n' "${route_labels% }"
+}
+
+restart_target_apps() {
+    local android_user package launcher
+    [[ "$ROUTE_ALL_APPS" == 0 && "$RESTART_TARGET_APPS" == 1 ]] || return 0
+    android_user=$(current_android_user)
+    [[ "$android_user" =~ ^[0-9]+$ ]] || return 1
+    for package in "${TARGET_PACKAGES[@]}"; do
+        [[ "$package" =~ ^[A-Za-z0-9._]+$ ]] || return 1
+        launcher=$(su -c "${ANDROID_BIN}/cmd package resolve-activity --brief --user ${android_user} -c android.intent.category.LAUNCHER ${package}" 2>/dev/null | "$TERMUX_PREFIX/bin/awk" '/\// { value=$0 } END { print value }')
+        [[ "$launcher" =~ ^[A-Za-z0-9._]+/[A-Za-z0-9._$]+$ ]] || return 1
+        su -c "${ANDROID_BIN}/am force-stop --user ${android_user} ${package} && ${ANDROID_BIN}/am start --user ${android_user} -n ${launcher}" >/dev/null 2>&1 || return 1
+    done
+}
+
+flush_android_dns_cache() {
+    local network_id
+    network_id=$(su -c "dumpsys dnsresolver" 2>/dev/null | \
+        "$TERMUX_PREFIX/bin/awk" -v interface="$cell_iface" '
+            /^NetId:/ { net_id = $2 }
+            /Interface names:/ && index($0, "[" interface "]") { print net_id; exit }
+        ')
+    [[ "$network_id" =~ ^[0-9]+$ ]] || return 1
+    su -c "service call dnsresolver 11 i32 ${network_id}" 2>/dev/null | \
+        "$TERMUX_PREFIX/bin/grep" -Fq "00000000"
+}
+
+tun_process_is_owned() {
+    su -c "
+        test -r '${TUN_PID_FILE}' || exit 1
+        p=\$(cat '${TUN_PID_FILE}')
+        case \"\$p\" in *[!0-9]*|'') exit 1 ;; esac
+        test -e /proc/\$p/exe || exit 1
+        test \"\$(readlink /proc/\$p/exe)\" = '${TUN_BIN}'
+    " >/dev/null 2>&1
+}
+
+tun_pid_is_owned() {
+    local eta_tun_pid=$1
+    [[ "$eta_tun_pid" =~ ^[0-9]+$ ]] || return 1
+    su -c "test -e /proc/${eta_tun_pid}/exe && test \"\$(readlink /proc/${eta_tun_pid}/exe)\" = '${TUN_BIN}'" \
+        >/dev/null 2>&1
+}
+
+terminate_tun_pid() {
+    local attempt eta_tun_pid=$1
+    tun_pid_is_owned "$eta_tun_pid" || return 1
+    su -c "kill -INT ${eta_tun_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        tun_pid_is_owned "$eta_tun_pid" || return 0
+        sleep 0.1
+    done
+    su -c "kill -KILL ${eta_tun_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        tun_pid_is_owned "$eta_tun_pid" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+reap_stale_tun() {
+    local attempt eta_tun_pid=""
+    [[ -d /sys/class/net/eta0 ]] || return 0
+    eta_tun_pid=$(su -c "cat '${TUN_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+    if ! terminate_tun_pid "$eta_tun_pid"; then
+        printf 'eta0 exists without a reclaimable eta-tun2socks owner.\n' >&2
+        return 1
+    fi
+    su -c "rm -f '${TUN_PID_FILE}'" >/dev/null 2>&1 || return 1
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        [[ ! -d /sys/class/net/eta0 ]] && return 0
+        sleep 0.1
+    done
+    [[ ! -d /sys/class/net/eta0 ]]
+}
+
+nfq_pid_is_owned() {
+    local eta_nfq_pid=$1
+    [[ "$eta_nfq_pid" =~ ^[0-9]+$ ]] || return 1
+    su -c "test -e /proc/${eta_nfq_pid}/exe && test \"\$(readlink /proc/${eta_nfq_pid}/exe)\" = '${NFQ_BIN}'" \
+        >/dev/null 2>&1
+}
+
+nfq_queue_is_bound() {
+    local eta_nfq_pid=$1
+    [[ "$eta_nfq_pid" =~ ^[0-9]+$ ]] || return 1
+    su -c "awk -v q='${NFQ_QUEUE}' -v p='${eta_nfq_pid}' '\$1 == q && \$2 == p { found=1 } END { exit !found }' /proc/net/netfilter/nfnetlink_queue" \
+        >/dev/null 2>&1
+}
+
+nfq_process_is_owned() {
+    local eta_nfq_pid=""
+    eta_nfq_pid=$(su -c "cat '${NFQ_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+    nfq_pid_is_owned "$eta_nfq_pid" && nfq_queue_is_bound "$eta_nfq_pid"
+}
+
+terminate_nfq_pid() {
+    local attempt eta_nfq_pid=$1
+    nfq_pid_is_owned "$eta_nfq_pid" || return 1
+    su -c "kill -TERM ${eta_nfq_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        nfq_pid_is_owned "$eta_nfq_pid" || return 0
+        sleep 0.1
+    done
+    su -c "kill -KILL ${eta_nfq_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        nfq_pid_is_owned "$eta_nfq_pid" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+reap_stale_nfq() {
+    local eta_nfq_pid=""
+    eta_nfq_pid=$(su -c "cat '${NFQ_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+    if [[ -n "$eta_nfq_pid" ]] && nfq_pid_is_owned "$eta_nfq_pid"; then
+        terminate_nfq_pid "$eta_nfq_pid" || return 1
+    fi
+    su -c "rm -f '${NFQ_PID_FILE}'" >/dev/null 2>&1
+}
+
+start_nfq() {
+    local attempt nfq_command rule_index
+    local -a command_args
+    reap_stale_nfq || return 1
+    command_args=("$NFQ_BIN" "--qnum=${NFQ_QUEUE}" "--uid=1:3003" --debug=0)
+    for ((rule_index = 0; rule_index < ${#FAKE_RULE_TYPES[@]}; rule_index++)); do
+        command_args+=(--filter-tcp=443 --filter-l7=tls)
+        if [[ "${FAKE_RULE_TYPES[$rule_index]}" == domain ]]; then
+            command_args+=("--hostlist-domains=${FAKE_RULE_TARGETS[$rule_index]}")
+        else
+            command_args+=("--ipset-ip=${FAKE_RULE_TARGETS[$rule_index]}")
+        fi
+        command_args+=(
+            --dpi-desync=fake
+            "--dpi-desync-ttl=${DIRECT_FAKE_TTL}"
+            "--dpi-desync-fwmark=${NFQ_BYPASS_MARK}"
+            "--dpi-desync-fake-tls-mod=rnd,sni=${FAKE_RULE_DECOYS[$rule_index]},dupsid"
+            --new
+        )
+    done
+    command_args+=(
+        --filter-tcp=443 --filter-l7=tls
+        --dpi-desync=fake
+        "--dpi-desync-ttl=${DIRECT_FAKE_TTL}"
+        "--dpi-desync-fwmark=${NFQ_BYPASS_MARK}"
+            "--dpi-desync-fake-tls-mod=rnd,sni=${ACTIVE_FAKE_SNI},dupsid"
+    )
+    printf -v nfq_command '%q ' "${command_args[@]}"
+    su -c "rm -f '${NFQ_PID_FILE}'; echo \$\$ > '${NFQ_PID_FILE}'; exec ${nfq_command}" &
+    nfq_launcher_pid=$!
+    nfq_started=1
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        nfq_pid=$(su -c "cat '${NFQ_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+        if nfq_pid_is_owned "$nfq_pid" && nfq_queue_is_bound "$nfq_pid"; then
+            return 0
+        fi
+        child_is_live "$nfq_launcher_pid" || break
+        sleep 0.1
+    done
+    stop_nfq
+    return 1
+}
+
+stop_nfq() {
+    local attempt eta_nfq_pid=""
+    if ((nfq_started)); then
+        eta_nfq_pid=$(su -c "cat '${NFQ_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+        if nfq_pid_is_owned "$eta_nfq_pid"; then
+            terminate_nfq_pid "$eta_nfq_pid" || {
+                printf 'Unable to stop owned eta-nfqws process %s.\n' "$eta_nfq_pid" >&2
+                return 1
+            }
+        fi
+    fi
+    su -c "rm -f '${NFQ_PID_FILE}'" >/dev/null 2>&1 || true
+    if [[ -n "$nfq_launcher_pid" ]]; then
+        kill "$nfq_launcher_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 20; attempt++)); do
+            child_is_live "$nfq_launcher_pid" || break
+            sleep 0.1
+        done
+        if child_is_live "$nfq_launcher_pid"; then
+            kill -KILL "$nfq_launcher_pid" 2>/dev/null || true
+        fi
+        wait "$nfq_launcher_pid" 2>/dev/null || true
+        nfq_launcher_pid=""
+    fi
+    nfq_pid=""
+    nfq_started=0
+}
+
+tether_pid_is_owned() {
+    local eta_tether_pid=$1
+    [[ "$eta_tether_pid" =~ ^[0-9]+$ ]] || return 1
+    su -c "test -e /proc/${eta_tether_pid}/exe && test \"\$(readlink /proc/${eta_tether_pid}/exe)\" = '${DIRECT_GATEWAY}'" \
+        >/dev/null 2>&1
+}
+
+tether_process_is_owned() {
+    local eta_tether_pid=""
+    eta_tether_pid=$(su -c "cat '${TETHER_PROXY_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+    tether_pid_is_owned "$eta_tether_pid"
+}
+
+terminate_tether_pid() {
+    local attempt eta_tether_pid=$1
+    tether_pid_is_owned "$eta_tether_pid" || return 1
+    su -c "kill -TERM ${eta_tether_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        tether_pid_is_owned "$eta_tether_pid" || return 0
+        sleep 0.1
+    done
+    su -c "kill -KILL ${eta_tether_pid}" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        tether_pid_is_owned "$eta_tether_pid" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+reap_stale_tether() {
+    local eta_tether_pid=""
+    eta_tether_pid=$(su -c "cat '${TETHER_PROXY_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+    if [[ -n "$eta_tether_pid" ]] && tether_pid_is_owned "$eta_tether_pid"; then
+        terminate_tether_pid "$eta_tether_pid" || return 1
+    fi
+    su -c "rm -f '${TETHER_PROXY_PID_FILE}'" >/dev/null 2>&1
+}
+
+start_tether_proxy() {
+    local attempt tether_command rule_index target_text
+    local -a command_args
+    reap_stale_tether || return 1
+    command_args=(
+        "$DIRECT_GATEWAY"
+        -E
+        -i 0.0.0.0
+        -p "$TETHER_PROXY_PORT"
+        -b "$DIRECT_BUFFER"
+        -c "$DIRECT_MAX_CONNECTIONS"
+        -x 0
+        -I 0.0.0.0
+        -k "$DIRECT_ROUTE_MARK"
+        -N
+        -U
+        -X
+    )
+    for ((rule_index = 0; rule_index < ${#FAKE_RULE_TYPES[@]}; rule_index++)); do
+        target_text=${FAKE_RULE_TARGETS[$rule_index]//,/ }
+        if [[ "${FAKE_RULE_TYPES[$rule_index]}" == domain ]]; then
+            command_args+=(-H ":${target_text}")
+        else
+            command_args+=(-j ":${target_text}")
+        fi
+        command_args+=(
+            -f"$DIRECT_FAKE_POSITION" -t"$DIRECT_FAKE_TTL"
+            -n "${FAKE_RULE_DECOYS[$rule_index]}" -Qr -A n
+        )
+    done
+    command_args+=(-f"$DIRECT_FAKE_POSITION" -t"$DIRECT_FAKE_TTL")
+    for target_text in "${FAKE_SNI_POOL[@]}"; do
+        command_args+=(-n "$target_text")
+    done
+    command_args+=(-Qr)
+    if ((${#DIRECT_EXTRA_ARGS[@]})); then
+        command_args+=("${DIRECT_EXTRA_ARGS[@]}")
+    fi
+    printf -v tether_command '%q ' "${command_args[@]}"
+    su -c "rm -f '${TETHER_PROXY_PID_FILE}'; echo \$\$ > '${TETHER_PROXY_PID_FILE}'; exec ${tether_command}" &
+    tether_launcher_pid=$!
+    tether_started=1
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        tether_pid=$(su -c "cat '${TETHER_PROXY_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+        if tether_pid_is_owned "$tether_pid" && su -c "ss -H -ltn 'sport = :${TETHER_PROXY_PORT}'" 2>/dev/null | "$TERMUX_PREFIX/bin/grep" -q '^LISTEN'; then
+            tether_active=1
+            return 0
+        fi
+        child_is_live "$tether_launcher_pid" || break
+        sleep 0.1
+    done
+    stop_tether_proxy
+    return 1
+}
+
+stop_tether_proxy() {
+    local attempt eta_tether_pid=""
+    if ((tether_started)); then
+        eta_tether_pid=$(su -c "cat '${TETHER_PROXY_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+        if tether_pid_is_owned "$eta_tether_pid"; then
+            terminate_tether_pid "$eta_tether_pid" || {
+                printf 'Unable to stop owned eta tether process %s.\n' "$eta_tether_pid" >&2
+                return 1
+            }
+        fi
+    fi
+    su -c "rm -f '${TETHER_PROXY_PID_FILE}'" >/dev/null 2>&1 || true
+    if [[ -n "$tether_launcher_pid" ]]; then
+        kill "$tether_launcher_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 20; attempt++)); do
+            child_is_live "$tether_launcher_pid" || break
+            sleep 0.1
+        done
+        if child_is_live "$tether_launcher_pid"; then
+            kill -KILL "$tether_launcher_pid" 2>/dev/null || true
+        fi
+        wait "$tether_launcher_pid" 2>/dev/null || true
+        tether_launcher_pid=""
+    fi
+    tether_pid=""
+    tether_started=0
+    tether_active=0
+}
+
+nfq_cooldown_active() {
+    local cooldown_until now
+    [[ -r "$NFQ_COOLDOWN_FILE" ]] || return 1
+    cooldown_until=$(<"$NFQ_COOLDOWN_FILE")
+    now=$(date +%s)
+    if [[ "$cooldown_until" =~ ^[0-9]+$ ]] && ((cooldown_until > now)); then
+        return 0
+    fi
+    rm -f "$NFQ_COOLDOWN_FILE"
+    return 1
+}
+
+mark_nfq_cooldown() {
+    local cooldown_tmp="${NFQ_COOLDOWN_FILE}.tmp.$$"
+    printf '%s\n' "$(( $(date +%s) + NFQ_COOLDOWN ))" >"$cooldown_tmp" && \
+        mv -f "$cooldown_tmp" "$NFQ_COOLDOWN_FILE"
+}
+
+child_is_live() {
+    kill -0 "$1" 2>/dev/null
+}
+
+stop_tun() {
+    local attempt eta_tun_pid=""
+    if ((tun_started)); then
+        eta_tun_pid=$(su -c "cat '${TUN_PID_FILE}' 2>/dev/null" | tr -d '\r\n')
+        if tun_pid_is_owned "$eta_tun_pid"; then
+            terminate_tun_pid "$eta_tun_pid" || {
+                printf 'Unable to stop owned eta-tun2socks process %s.\n' "$eta_tun_pid" >&2
+                return 1
+            }
+        fi
+        su -c "rm -f '${TUN_PID_FILE}'" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$tun_launcher_pid" ]]; then
+        kill "$tun_launcher_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 30; attempt++)); do
+            child_is_live "$tun_launcher_pid" || break
+            sleep 0.1
+        done
+        if child_is_live "$tun_launcher_pid"; then
+            kill -KILL "$tun_launcher_pid" 2>/dev/null || true
+        fi
+        wait "$tun_launcher_pid" 2>/dev/null || true
+        tun_launcher_pid=""
+    fi
+    tun_started=0
+}
+
+start_tun_stack() {
+    local attempt
+    stop_tun
+    su -c "rm -f '${TUN_PID_FILE}'; echo \$\$ > '${TUN_PID_FILE}'; exec '${TUN_BIN}' '${TUN_CONFIG}'" &
+    tun_launcher_pid=$!
+    tun_started=1
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if [[ -d /sys/class/net/eta0 ]] && child_is_live "$tun_launcher_pid"; then
+            tun_process_is_owned && return 0
+        fi
+        child_is_live "$tun_launcher_pid" || break
+        sleep 0.1
+    done
+    stop_tun
+    return 1
+}
+
+data_stack_is_live() {
+    if ((tether_active)) && ! tether_process_is_owned; then
+        return 1
+    fi
+    if [[ "$direct_stack" == nfqueue ]]; then
+        nfq_process_is_owned
+    else
+        child_is_live "$tun_launcher_pid" && [[ -d /sys/class/net/eta0 ]] && tun_process_is_owned
+    fi
+}
+
+cleanup() {
+    trap '' INT TERM
+    if ((cleanup_done)); then
+        return
+    fi
+    cleanup_done=1
+    if ((!lock_held)); then
+        return
+    fi
+    rm -f "$READY_FILE" "$HEALTH_FILE" "$STACK_FILE"
+    if ((network_cleanup_owned)); then
+        clear_packet_policy || true
+    fi
+    stop_nfq
+    stop_tun
+    stop_tether_proxy
+    stop_transport
+    if ((resolver_routes_installed)); then
+        if resolver_rules del >/dev/null 2>&1; then
+            resolver_routes_installed=0
+        fi
+    fi
+    clear_direct_route || true
+    if ((wake_lock_held)); then
+        command -v termux-wake-unlock >/dev/null && termux-wake-unlock >/dev/null 2>&1 || true
+    fi
+    if ((lock_held)); then
+        rm -f "$LOCK_DIR/pid"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+acquire_lock() {
+    local old_pid="" old_command=""
+    mkdir -p "$STATE_DIR" || return 1
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        if [[ -r "$LOCK_DIR/pid" ]]; then
+            old_pid=$(<"$LOCK_DIR/pid")
+        fi
+        if [[ "$old_pid" =~ ^[0-9]+$ && -d "/proc/$old_pid" ]]; then
+            old_command=$(tr '\0' ' ' <"/proc/$old_pid/cmdline" 2>/dev/null || true)
+            if [[ -z "$old_command" || "$old_command" == *eta-net* ]]; then
+                printf 'eta-net is already running.\n' >&2
+                return 1
+            fi
+        fi
+        rm -f "$LOCK_DIR/pid"
+        if ! rmdir "$LOCK_DIR" 2>/dev/null || ! mkdir "$LOCK_DIR" 2>/dev/null; then
+            printf 'Unable to acquire eta-net lock.\n' >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    rm -f "$READY_FILE"
+    lock_held=1
+}
+
+stop_dns_proxy() {
+    local attempt
+    if [[ -n "$dns_proxy_pid" ]]; then
+        kill "$dns_proxy_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 30; attempt++)); do
+            child_is_live "$dns_proxy_pid" || break
+            sleep 0.1
+        done
+        if child_is_live "$dns_proxy_pid"; then
+            kill -KILL "$dns_proxy_pid" 2>/dev/null || true
+        fi
+        wait "$dns_proxy_pid" 2>/dev/null || true
+        dns_proxy_pid=""
+    fi
+}
+
+stop_primary_transport() {
+    local attempt
+    if [[ -n "$transport_pid" ]]; then
+        kill "$transport_pid" 2>/dev/null || true
+        for ((attempt = 0; attempt < 30; attempt++)); do
+            child_is_live "$transport_pid" || break
+            sleep 0.1
+        done
+        if child_is_live "$transport_pid"; then
+            kill -KILL "$transport_pid" 2>/dev/null || true
+        fi
+        wait "$transport_pid" 2>/dev/null || true
+        transport_pid=""
+    fi
+}
+
+stop_transport() {
+    stop_dns_proxy
+    stop_primary_transport
+    transport_kind=""
+    transport_mode=""
+}
+
+transport_listener_ready() {
+    listener_ready "$SOCKS_PORT"
+}
+
+listener_ready() {
+    local port=$1
+    su -c "ss -H -ltn 'sport = :${port}'" 2>/dev/null | "$TERMUX_PREFIX/bin/grep" -q '^LISTEN'
+}
+
+start_dns_transport() {
+    local mode=$1 attempt service_name=socks-fast edns_size=1232
+    local -a command_args
+    [[ -n "$DNS_SUFFIX" ]] || {
+        printf 'ETA_DNS_SUFFIX is required for DNS transport.\n' >&2
+        return 1
+    }
+    stop_transport
+    if ((RESPONSE_SIZE != 957)); then
+        service_name="socks-fast:${RESPONSE_SIZE}"
+    fi
+    if ((RESPONSE_SIZE > edns_size)); then
+        edns_size=$RESPONSE_SIZE
+    fi
+    command_args=(
+        client
+        -remote "$remote_list"
+        -listen "127.0.0.1:${SOCKS_PORT}"
+        -key-file "$DNSSTREAM_KEY"
+        -suffix "$DNS_SUFFIX"
+        -service "$service_name"
+        -edns-size "$edns_size"
+        -upstream-window "$UPSTREAM_WINDOW"
+        -downstream-window "$DOWNSTREAM_WINDOW"
+    )
+    if [[ "$mode" == udp ]]; then
+        if ((UPSTREAM_WINDOW > 1 || DOWNSTREAM_WINDOW > 1)); then
+            command_args+=(-transactions-per-udp 1)
+        else
+            command_args+=(-transactions-per-udp 2)
+        fi
+        command_args+=(-udp-inflight "$UDP_INFLIGHT")
+    elif [[ "$mode" == tcp ]]; then
+        command_args+=(-tcp -transactions-per-tcp 32 -tcp-pool-size "$TCP_POOL_SIZE")
+    else
+        return 1
+    fi
+    "$DNSSTREAM" "${command_args[@]}" &
+    transport_pid=$!
+    transport_kind=dns
+    transport_mode=$mode
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if ! child_is_live "$transport_pid"; then
+            break
+        fi
+        transport_listener_ready && return 0
+        sleep 0.05
+    done
+    if ! child_is_live "$transport_pid" || ! transport_listener_ready; then
+        stop_transport
+        return 1
+    fi
+}
+
+start_tls_transport() {
+    local attempt
+    stop_transport
+    "$TLS_GATEWAY" tls-client \
+        -remote "$TLS_REMOTE" \
+        -listen "127.0.0.1:${SOCKS_PORT}" \
+        -sni "$TLS_SNI" \
+        -cert "$TLS_CERT_DIR/client.crt" \
+        -key "$TLS_CERT_DIR/client.key" \
+        -ca "$TLS_CERT_DIR/ca.crt" \
+        -mux-carriers "$TLS_CARRIERS" \
+        -tcp-buffer "$TLS_TCP_BUFFER" &
+    transport_pid=$!
+    transport_kind=tls
+    transport_mode=tls
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if ! child_is_live "$transport_pid"; then
+            break
+        fi
+        transport_listener_ready && return 0
+        sleep 0.05
+    done
+    if ! child_is_live "$transport_pid" || ! transport_listener_ready; then
+        stop_transport
+        return 1
+    fi
+}
+
+start_direct_dns() {
+    local mode=$1 attempt listen_spec="127.0.0.1:${DIRECT_DNS_PORT},[::1]:${DIRECT_DNS_PORT}"
+    local -a command_args
+    stop_dns_proxy
+    if ((TETHER_MODE)); then
+        listen_spec="0.0.0.0:${DIRECT_DNS_PORT}"
+    fi
+    command_args=(
+        -listen "$listen_spec"
+        -endpoint "$DIRECT_DOH_ENDPOINT"
+        -bootstrap "$DIRECT_DOH_BOOTSTRAP"
+        -timeout "${DIRECT_DOH_TIMEOUT}s"
+        -attempt-timeout "$DIRECT_DOH_ATTEMPT_TIMEOUT"
+        -fallback-resolvers "$DIRECT_DNS_FALLBACK"
+        -fallback-timeout "$DIRECT_DNS_FALLBACK_TIMEOUT"
+    )
+    if [[ "$mode" == nfqueue ]]; then
+        command_args+=(-socks direct -fwmark "$NFQ_ROUTE_MARK")
+    elif [[ "$mode" == socks ]]; then
+        command_args+=(-socks "127.0.0.1:${SOCKS_PORT}")
+    else
+        return 1
+    fi
+    "$DIRECT_DNS" "${command_args[@]}" &
+    dns_proxy_pid=$!
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if ! child_is_live "$dns_proxy_pid"; then
+            break
+        fi
+        listener_ready "$DIRECT_DNS_PORT" && return 0
+        sleep 0.05
+    done
+    stop_dns_proxy
+    return 1
+}
+
+start_direct_transport() {
+    local attempt rule_index target_text
+    local -a command_args
+    stop_transport
+    command_args=(
+        -i 127.0.0.1
+        -p "$SOCKS_PORT"
+        -b "$DIRECT_BUFFER"
+        -c "$DIRECT_MAX_CONNECTIONS"
+        -x 0
+        -I 0.0.0.0
+        -k "$DIRECT_ROUTE_MARK"
+        -N
+        -U
+        -X
+    )
+    for ((rule_index = 0; rule_index < ${#FAKE_RULE_TYPES[@]}; rule_index++)); do
+        target_text=${FAKE_RULE_TARGETS[$rule_index]//,/ }
+        if [[ "${FAKE_RULE_TYPES[$rule_index]}" == domain ]]; then
+            command_args+=(-H ":${target_text}")
+        else
+            command_args+=(-j ":${target_text}")
+        fi
+        command_args+=(
+            -f"$DIRECT_FAKE_POSITION" -t"$DIRECT_FAKE_TTL"
+            -n "${FAKE_RULE_DECOYS[$rule_index]}" -Qr -A n
+        )
+    done
+    command_args+=(-f"$DIRECT_FAKE_POSITION" -t"$DIRECT_FAKE_TTL")
+    for target_text in "${FAKE_SNI_POOL[@]}"; do
+        command_args+=(-n "$target_text")
+    done
+    command_args+=(-Qr)
+    if ((${#DIRECT_EXTRA_ARGS[@]})); then
+        command_args+=("${DIRECT_EXTRA_ARGS[@]}")
+    fi
+    "$DIRECT_GATEWAY" "${command_args[@]}" &
+    transport_pid=$!
+    transport_kind=direct
+    transport_mode=direct
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if ! child_is_live "$transport_pid"; then
+            break
+        fi
+        transport_listener_ready && break
+        sleep 0.05
+    done
+    if ! child_is_live "$transport_pid" || ! transport_listener_ready; then
+        stop_transport
+        return 1
+    fi
+
+    if start_direct_dns socks; then
+        return 0
+    fi
+    stop_transport
+    return 1
+}
+
+carrier_check() {
+    local reddit_code
+    reddit_code=$(env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY \
+        -u all_proxy -u https_proxy -u http_proxy -u no_proxy \
+        "$TERMUX_PREFIX/bin/curl" --socks5-hostname "127.0.0.1:${SOCKS_PORT}" \
+        --noproxy '' \
+        -A 'Mozilla/5.0 (Android 14) eta-net' \
+        -sS -I --connect-timeout "$HEALTH_TIMEOUT" --max-time "$HEALTH_TIMEOUT" \
+        -o /dev/null -w '%{http_code}' \
+        https://old.reddit.com/ 2>/dev/null || true)
+    [[ "$reddit_code" =~ ^[1-5][0-9][0-9]$ ]]
+}
+
+direct_carrier_check() {
+    local check_ip check_code
+    check_ip=$("$TERMUX_PREFIX/bin/dig" \
+        @127.0.0.1 -p "$DIRECT_DNS_PORT" "$DIRECT_CHECK_HOST" A \
+        +short +time="$HEALTH_TIMEOUT" +tries=1 2>/dev/null | \
+        "$TERMUX_PREFIX/bin/awk" '/^([0-9]{1,3}\.){3}[0-9]{1,3}$/ { print; exit }')
+    [[ "$check_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    check_code=$(env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY \
+        -u all_proxy -u https_proxy -u http_proxy -u no_proxy \
+        "$TERMUX_PREFIX/bin/curl" --socks5 "127.0.0.1:${SOCKS_PORT}" \
+        --resolve "${DIRECT_CHECK_HOST}:443:${check_ip}" \
+        --noproxy '' \
+        -A 'Mozilla/5.0 (Android 14) eta-net' \
+        -sS --connect-timeout "$HEALTH_TIMEOUT" --max-time "$HEALTH_TIMEOUT" \
+        -o /dev/null -w '%{http_code}' \
+        "$DIRECT_CHECK_URL" 2>/dev/null || true)
+    [[ "$check_code" =~ ^[1-5][0-9][0-9]$ ]]
+}
+
+direct_dns_check() {
+    local check_ip
+    check_ip=$("$TERMUX_PREFIX/bin/dig" \
+        @127.0.0.1 -p "$DIRECT_DNS_PORT" discord.com A \
+        +short +time=3 +tries=1 2>/dev/null | \
+        "$TERMUX_PREFIX/bin/awk" '/^([0-9]{1,3}\.){3}[0-9]{1,3}$/ { print; exit }')
+    [[ "$check_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && "$check_ip" != 195.175.254.2 ]]
+}
+
+switch_direct_dns_to_nfq() {
+    if ! start_direct_dns nfqueue; then
+        start_direct_dns socks || return 1
+        return 1
+    fi
+    if ! direct_dns_check; then
+        start_direct_dns socks || return 1
+        return 1
+    fi
+    stop_primary_transport
+    return 0
+}
+
+resolve_watchdog_uid() {
+    local android_user package_line watchdog_package
+    if [[ "$ROUTE_ALL_APPS" == 1 ]]; then
+        android_user=0
+        watchdog_package=com.termux
+    else
+        android_user=$(current_android_user) || return 1
+        watchdog_package=${TARGET_PACKAGES[0]:-}
+    fi
+    [[ "$watchdog_package" =~ ^[A-Za-z0-9._]+$ ]] || return 1
+    package_line=$(su -c "${ANDROID_BIN}/cmd package list packages -U --user ${android_user} ${watchdog_package}" 2>/dev/null | \
+        "$TERMUX_PREFIX/bin/awk" -v wanted="package:${watchdog_package}" '$1 == wanted { print; exit }')
+    watchdog_uid=${package_line##*uid:}
+    [[ "$watchdog_uid" =~ ^[0-9]+$ ]] && ((watchdog_uid >= 10000))
+}
+
+watchdog_check() {
+    local watchdog_code
+    watchdog_code=$(su "$watchdog_uid" -c \
+        "'$TERMUX_PREFIX/bin/curl' --noproxy '*' -4 -sS --connect-timeout '$WATCHDOG_TIMEOUT' --max-time '$WATCHDOG_TIMEOUT' -o /dev/null -w '%{http_code}' https://www.google.com/generate_204" \
+        2>/dev/null | tr -d '\r\n' || true)
+    [[ "$watchdog_code" == 204 ]]
+}
+
+publish_health() {
+    local health_tmp="${HEALTH_FILE}.tmp.$$"
+    if ! printf '%s %s\n' "$(date +%s)" "$WATCHDOG_INTERVAL" >"$health_tmp" ||
+       ! mv -f "$health_tmp" "$HEALTH_FILE"; then
+        rm -f "$health_tmp"
+        return 1
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ ! "$ROUTE_ALL_APPS" =~ ^[01]$ || ! "$RESTART_TARGET_APPS" =~ ^[01]$ || ! "$TETHER_MODE" =~ ^[01]$ ]]; then
+    printf 'ETA_ROUTE_ALL_APPS, ETA_RESTART_APPS, and ETA_TETHER must be 0 or 1.\n' >&2
+    exit 1
+fi
+if [[ ! "$TETHER_PROXY_PORT" =~ ^[0-9]+$ ]] || ((TETHER_PROXY_PORT < 1024 || TETHER_PROXY_PORT > 65535)) || \
+   ((TETHER_PROXY_PORT == SOCKS_PORT || TETHER_PROXY_PORT == DIRECT_DNS_PORT)); then
+    printf 'ETA_TETHER_PORT must be an unused port between 1024 and 65535.\n' >&2
+    exit 1
+fi
+if [[ ! "$ROUTE_SYSTEM_DNS" =~ ^(auto|0|1)$ ]]; then
+    printf 'ETA_SYSTEM_DNS must be auto, 0, or 1.\n' >&2
+    exit 1
+fi
+if [[ "$ROUTE_SYSTEM_DNS" == auto ]]; then
+    ROUTE_SYSTEM_DNS=$ROUTE_ALL_APPS
+fi
+if [[ ! "$TRANSPORT" =~ ^(direct|dns|tls|auto)$ ]]; then
+    printf 'ETA_TRANSPORT must be direct, tls, dns, or auto.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_STACK" =~ ^(auto|nfqueue|tun)$ ]]; then
+    printf 'ETA_DIRECT_STACK must be auto, nfqueue, or tun.\n' >&2
+    exit 1
+fi
+if [[ ! "$NFQ_PACKET_LIMIT" =~ ^[0-9]+$ ]] || ((NFQ_PACKET_LIMIT < 6 || NFQ_PACKET_LIMIT > 32)); then
+    printf 'ETA_NFQ_PACKET_LIMIT must be between 6 and 32.\n' >&2
+    exit 1
+fi
+if [[ ! "$NFQ_COOLDOWN" =~ ^[0-9]+$ ]] || ((NFQ_COOLDOWN < 30 || NFQ_COOLDOWN > 3600)); then
+    printf 'ETA_NFQ_COOLDOWN must be between 30 and 3600 seconds.\n' >&2
+    exit 1
+fi
+normalize_fake_sni_pool || exit 1
+normalize_fake_sni_rules || exit 1
+if [[ ! "$DIRECT_FAKE_TTL" =~ ^[0-9]+$ ]] || ((DIRECT_FAKE_TTL < 1 || DIRECT_FAKE_TTL > 64)); then
+    printf 'ETA_DIRECT_FAKE_TTL must be between 1 and 64.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_FAKE_POSITION" =~ ^-?[0-9]+$ ]] || ((DIRECT_FAKE_POSITION < -65535 || DIRECT_FAKE_POSITION > 65535)); then
+    printf 'ETA_DIRECT_FAKE_POSITION must be between -65535 and 65535.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_BUFFER" =~ ^[0-9]+$ ]] || ((DIRECT_BUFFER < 16384 || DIRECT_BUFFER > 4194304)); then
+    printf 'ETA_DIRECT_BUFFER must be between 16384 and 4194304 bytes.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_MAX_CONNECTIONS" =~ ^[0-9]+$ ]] || ((DIRECT_MAX_CONNECTIONS < 64 || DIRECT_MAX_CONNECTIONS > 8192)); then
+    printf 'ETA_DIRECT_MAX_CONNECTIONS must be between 64 and 8192.\n' >&2
+    exit 1
+fi
+direct_endpoint_spec=${DIRECT_DOH_ENDPOINT//;/ }
+read -r -a DIRECT_DOH_ENDPOINTS <<< "$direct_endpoint_spec"
+if ((${#DIRECT_DOH_ENDPOINTS[@]} == 0)); then
+    printf 'At least one DoH endpoint is required.\n' >&2
+    exit 1
+fi
+for direct_endpoint in "${DIRECT_DOH_ENDPOINTS[@]}"; do
+    if [[ ! "$direct_endpoint" =~ ^https://[^[:space:]]+$ ]]; then
+        printf 'Invalid DoH endpoint: %s\n' "$direct_endpoint" >&2
+        exit 1
+    fi
+done
+if [[ ! "$DIRECT_DOH_TIMEOUT" =~ ^[0-9]+$ ]] || ((DIRECT_DOH_TIMEOUT < 3 || DIRECT_DOH_TIMEOUT > 30)); then
+    printf 'ETA_DIRECT_DOH_TIMEOUT must be between 3 and 30 seconds.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_DOH_ATTEMPT_TIMEOUT" =~ ^([0-9]+ms|[1-9][0-9]*s)$ ]]; then
+    printf 'ETA_DIRECT_DOH_ATTEMPT_TIMEOUT must use ms or s.\n' >&2
+    exit 1
+fi
+if [[ ! "$DIRECT_DNS_FALLBACK_TIMEOUT" =~ ^([0-9]+ms|[1-9][0-9]*s)$ ]]; then
+    printf 'ETA_DIRECT_DNS_FALLBACK_TIMEOUT must use ms or s.\n' >&2
+    exit 1
+fi
+direct_bootstrap_spec=${DIRECT_DOH_BOOTSTRAP//,/ }
+direct_bootstrap_spec=${direct_bootstrap_spec//;/ }
+read -r -a DIRECT_DOH_BOOTSTRAPS <<< "$direct_bootstrap_spec"
+IFS=';' read -r -a DIRECT_DOH_BOOTSTRAP_GROUPS <<< "$DIRECT_DOH_BOOTSTRAP"
+if ((${#DIRECT_DOH_BOOTSTRAPS[@]} == 0)); then
+    printf 'At least one DoH bootstrap endpoint is required.\n' >&2
+    exit 1
+fi
+for direct_bootstrap in "${DIRECT_DOH_BOOTSTRAPS[@]}"; do
+    if ! valid_resolver "$direct_bootstrap"; then
+        printf 'Invalid DoH bootstrap endpoint: %s\n' "$direct_bootstrap" >&2
+        exit 1
+    fi
+done
+if ((${#DIRECT_DOH_ENDPOINTS[@]} != ${#DIRECT_DOH_BOOTSTRAP_GROUPS[@]})); then
+    printf 'DoH endpoint and bootstrap provider counts differ.\n' >&2
+    exit 1
+fi
+if [[ ! "$TLS_CARRIERS" =~ ^[0-9]+$ ]] || ((TLS_CARRIERS > 8)); then
+    printf 'ETA_TLS_CARRIERS must be between 0 and 8.\n' >&2
+    exit 1
+fi
+if [[ ! "$TLS_TCP_BUFFER" =~ ^[0-9]+$ ]] || ((TLS_TCP_BUFFER < 65536 || TLS_TCP_BUFFER > 8388608)); then
+    printf 'ETA_TLS_BUFFER must be between 65536 and 8388608 bytes.\n' >&2
+    exit 1
+fi
+if [[ "$TRANSPORT" == tls || "$TRANSPORT" == auto ]]; then
+    if ! valid_resolver "$TLS_REMOTE"; then
+        printf 'Invalid TLS endpoint: %s\n' "$TLS_REMOTE" >&2
+        exit 1
+    fi
+    if [[ ! "$TLS_SNI" =~ ^[A-Za-z0-9.-]+$ || ${#TLS_SNI} -gt 253 ]]; then
+        printf 'Invalid TLS server name: %s\n' "$TLS_SNI" >&2
+        exit 1
+    fi
+    DIRECT_RESOLVERS+=("$TLS_REMOTE")
+fi
+if [[ ! "$CARRIER_MODE" =~ ^(tcp|udp|auto)$ ]]; then
+    printf 'ETA_CARRIER_MODE must be tcp, udp, or auto.\n' >&2
+    exit 1
+fi
+if [[ ! "$TCP_POOL_SIZE" =~ ^[0-9]+$ ]] || ((TCP_POOL_SIZE < 1 || TCP_POOL_SIZE > 64)); then
+    printf 'ETA_TCP_POOL_SIZE must be between 1 and 64.\n' >&2
+    exit 1
+fi
+if [[ ! "$UDP_INFLIGHT" =~ ^[0-9]+$ ]] || ((UDP_INFLIGHT < 2 || UDP_INFLIGHT > 64)); then
+    printf 'ETA_UDP_INFLIGHT must be between 2 and 64.\n' >&2
+    exit 1
+fi
+if [[ ! "$UPSTREAM_WINDOW" =~ ^[0-9]+$ ]] || ((UPSTREAM_WINDOW < 1 || UPSTREAM_WINDOW > 32)); then
+    printf 'ETA_UPSTREAM_WINDOW must be between 1 and 32.\n' >&2
+    exit 1
+fi
+if [[ ! "$DOWNSTREAM_WINDOW" =~ ^[0-9]+$ ]] || ((DOWNSTREAM_WINDOW < 1 || DOWNSTREAM_WINDOW > 32)); then
+    printf 'ETA_DOWNSTREAM_WINDOW must be between 1 and 32.\n' >&2
+    exit 1
+fi
+if [[ ! "$RESPONSE_SIZE" =~ ^[0-9]+$ ]] || ((RESPONSE_SIZE < 512 || RESPONSE_SIZE > 4096)); then
+    printf 'ETA_RESPONSE_SIZE must be between 512 and 4096 bytes.\n' >&2
+    exit 1
+fi
+if [[ ! "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || ((HEALTH_TIMEOUT < 5 || HEALTH_TIMEOUT > 120)); then
+    printf 'ETA_HEALTH_TIMEOUT must be between 5 and 120 seconds.\n' >&2
+    exit 1
+fi
+if [[ ! "$WATCHDOG_INTERVAL" =~ ^[0-9]+$ ]] || \
+   ((WATCHDOG_INTERVAL != 0 && (WATCHDOG_INTERVAL < 15 || WATCHDOG_INTERVAL > 3600))); then
+    printf 'ETA_WATCHDOG_INTERVAL must be 0 or between 15 and 3600 seconds.\n' >&2
+    exit 1
+fi
+if [[ ! "$WATCHDOG_TIMEOUT" =~ ^[0-9]+$ ]] || ((WATCHDOG_TIMEOUT < 3 || WATCHDOG_TIMEOUT > 30)); then
+    printf 'ETA_WATCHDOG_TIMEOUT must be between 3 and 30 seconds.\n' >&2
+    exit 1
+fi
+if [[ ! "$WATCHDOG_FAILURES" =~ ^[0-9]+$ ]] || ((WATCHDOG_FAILURES < 1 || WATCHDOG_FAILURES > 10)); then
+    printf 'ETA_WATCHDOG_FAILURES must be between 1 and 10.\n' >&2
+    exit 1
+fi
+normalize_inputs || exit 1
+
+dns_transport_available=0
+tls_transport_available=0
+direct_transport_available=0
+tun_available=0
+nfq_available=0
+if [[ -x "$DNSSTREAM" && -r "$DNSSTREAM_KEY" ]]; then
+    dns_transport_available=1
+fi
+if [[ -x "$TLS_GATEWAY" && -r "$TLS_CERT_DIR/client.crt" && \
+      -r "$TLS_CERT_DIR/client.key" && -r "$TLS_CERT_DIR/ca.crt" ]]; then
+    tls_transport_available=1
+fi
+if [[ -x "$DIRECT_GATEWAY" && -x "$DIRECT_DNS" && -x "$TERMUX_PREFIX/bin/dig" ]]; then
+    direct_transport_available=1
+fi
+if su -c "test -x '${TUN_BIN}' && test -r '${TUN_CONFIG}' && test -r '${TUN_CONFIG_DIRECT}'"; then
+    tun_available=1
+fi
+if su -c "test -x '${NFQ_BIN}' && grep -qx NFQUEUE /proc/net/ip_tables_targets && test -r /proc/net/netfilter/nfnetlink_queue"; then
+    nfq_available=1
+fi
+case "$TRANSPORT" in
+direct)
+    if ((!direct_transport_available)); then
+        printf 'Missing direct transport or DNS helper binary.\n' >&2
+        exit 1
+    fi
+    ;;
+dns)
+    if ((!dns_transport_available)); then
+        printf 'Missing DNS transport binary or key.\n' >&2
+        exit 1
+    fi
+    ;;
+tls)
+    if ((!tls_transport_available)); then
+        printf 'Missing TLS transport binary or certificates.\n' >&2
+        exit 1
+    fi
+    ;;
+auto)
+    if ((!direct_transport_available && !tls_transport_available && !dns_transport_available)); then
+        printf 'No usable direct, TLS, or DNS transport installation found.\n' >&2
+        exit 1
+    fi
+    ;;
+esac
+if [[ "$TRANSPORT" =~ ^(dns|tls)$ ]] && ((!tun_available)); then
+    printf 'Missing eta TUN installation.\n' >&2
+    exit 1
+fi
+if [[ "$TRANSPORT" == direct && "$DIRECT_STACK" == tun ]] && ((!tun_available)); then
+    printf 'Direct TUN stack requested but eta TUN is missing.\n' >&2
+    exit 1
+fi
+if [[ "$TRANSPORT" == direct && "$DIRECT_STACK" == nfqueue ]] && ((!nfq_available)); then
+    printf 'Direct NFQUEUE stack requested but eta-nfqws or kernel NFQUEUE is missing.\n' >&2
+    exit 1
+fi
+if [[ "$TRANSPORT" == direct && "$DIRECT_STACK" == auto ]] && ((!nfq_available && !tun_available)); then
+    printf 'No direct data stack is installed.\n' >&2
+    exit 1
+fi
+
+acquire_lock || exit 1
+reap_stale_tun || exit 1
+reap_stale_nfq || exit 1
+reap_stale_tether || exit 1
+network_cleanup_owned=1
+if ! clear_packet_policy; then
+    printf 'Unable to clear stale eta-net policy.\n' >&2
+    exit 1
+fi
+install_resolver_routes || exit 1
+if [[ "$TRANSPORT" =~ ^(direct|auto)$ ]]; then
+    install_direct_route || exit 1
+fi
+if ! routing_targets=$(route_targets); then
+    printf 'Unable to resolve target application UID.\n' >&2
+    exit 1
+fi
+
+remote_list=""
+for resolver in "${RESOLVERS[@]}"; do
+    remote_list+="${resolver},"
+done
+remote_list=${remote_list%,}
+printf 'Tuning: transport=%s direct-stack=%s tether=%s tether-port=%s fake-sni=%s fake-sni-pool=%s fake-sni-rules=%s fake-ttl=%s fake-position=%s direct-buffer=%s direct-max=%s nfq-packets=%s nfq-cooldown=%s doh-timeout=%s doh-attempt=%s dns-fallback-timeout=%s tls-carriers=%s tls-buffer=%s carrier=%s udp-inflight=%s tcp-pool=%s upstream-window=%s downstream-window=%s response-size=%s system-dns=%s resolvers=%s\n' \
+    "$TRANSPORT" "$DIRECT_STACK" "$TETHER_MODE" "$TETHER_PROXY_PORT" "$ACTIVE_FAKE_SNI" "${FAKE_SNI_POOL[*]}" "${#FAKE_RULE_TYPES[@]}" "$DIRECT_FAKE_TTL" "$DIRECT_FAKE_POSITION" "$DIRECT_BUFFER" "$DIRECT_MAX_CONNECTIONS" "$NFQ_PACKET_LIMIT" "$NFQ_COOLDOWN" "$DIRECT_DOH_TIMEOUT" "$DIRECT_DOH_ATTEMPT_TIMEOUT" "$DIRECT_DNS_FALLBACK_TIMEOUT" "$TLS_CARRIERS" "$TLS_TCP_BUFFER" "$CARRIER_MODE" "$UDP_INFLIGHT" "$TCP_POOL_SIZE" "$UPSTREAM_WINDOW" "$DOWNSTREAM_WINDOW" "$RESPONSE_SIZE" "$ROUTE_SYSTEM_DNS" "$remote_list"
+printf 'Watchdog: interval=%s timeout=%s failures=%s\n' \
+    "$WATCHDOG_INTERVAL" "$WATCHDOG_TIMEOUT" "$WATCHDOG_FAILURES"
+
+if command -v termux-wake-lock >/dev/null && termux-wake-lock >/dev/null 2>&1; then
+    wake_lock_held=1
+fi
+transport_attempts=()
+if [[ "$TRANSPORT" =~ ^(direct|auto)$ && "$direct_transport_available" == 1 ]]; then
+    transport_attempts+=(direct)
+fi
+if [[ "$TRANSPORT" =~ ^(tls|auto)$ && "$tls_transport_available" == 1 && "$tun_available" == 1 ]]; then
+    transport_attempts+=(tls)
+fi
+if [[ "$TRANSPORT" =~ ^(dns|auto)$ && "$dns_transport_available" == 1 && "$tun_available" == 1 ]]; then
+    case "$CARRIER_MODE" in
+    udp) transport_attempts+=(dns-udp) ;;
+    tcp) transport_attempts+=(dns-tcp) ;;
+    auto) transport_attempts+=(dns-udp dns-tcp) ;;
+    esac
+fi
+transport_ready=0
+for attempt_transport in "${transport_attempts[@]}"; do
+    if [[ "$attempt_transport" == direct ]]; then
+        printf 'Checking local direct path with fake SNI %s and TTL %s.\n' "$ACTIVE_FAKE_SNI" "$DIRECT_FAKE_TTL"
+        if start_direct_transport && direct_carrier_check; then
+            transport_ready=1
+            break
+        fi
+        printf 'Local direct path unavailable.\n' >&2
+        continue
+    fi
+    if [[ "$attempt_transport" == tls ]]; then
+        printf 'Checking direct TLS transport to %s with SNI %s.\n' "$TLS_REMOTE" "$TLS_SNI"
+        if start_tls_transport && carrier_check; then
+            transport_ready=1
+            break
+        fi
+        printf 'Direct TLS transport unavailable.\n' >&2
+        continue
+    fi
+    mode=${attempt_transport#dns-}
+    printf 'Checking DNS/%s carrier.\n' "${mode^^}"
+    if start_dns_transport "$mode" && carrier_check; then
+        transport_ready=1
+        break
+    fi
+    printf 'DNS/%s carrier unavailable.\n' "${mode^^}" >&2
+done
+if ((!transport_ready)); then
+    printf 'Transport check failed; application routing was not changed.\n' >&2
+    exit 1
+fi
+if [[ "$transport_kind" == direct ]]; then
+    printf 'Transport mode: local direct.\n'
+    TUN_CONFIG=$TUN_CONFIG_DIRECT
+elif [[ "$transport_kind" == tls ]]; then
+    printf 'Transport mode: direct TLS.\n'
+    if su -c "test -r '${TUN_CONFIG_TLS}'"; then
+        TUN_CONFIG=$TUN_CONFIG_TLS
+    fi
+else
+    printf 'Transport mode: DNS/%s.\n' "${transport_mode^^}"
+fi
+
+if [[ "$transport_kind" == direct && "$DIRECT_STACK" != tun ]]; then
+    if [[ "$DIRECT_STACK" == auto ]] && ((tun_available)) && nfq_cooldown_active; then
+        printf 'NFQUEUE cooldown active; using TUN fallback.\n'
+    elif ((nfq_available)) && start_nfq; then
+        direct_stack=nfqueue
+        printf 'Data stack: NFQUEUE, queue %s, first %s packets.\n' "$NFQ_QUEUE" "$NFQ_PACKET_LIMIT"
+    elif [[ "$DIRECT_STACK" == nfqueue ]]; then
+        printf 'NFQUEUE data stack did not start.\n' >&2
+        exit 1
+    else
+        printf 'NFQUEUE unavailable; using TUN fallback.\n' >&2
+    fi
+fi
+
+if [[ -z "$direct_stack" ]]; then
+    if ((!tun_available)); then
+        printf 'TUN fallback is unavailable.\n' >&2
+        exit 1
+    fi
+    direct_stack=tun
+    printf 'TUN profile: %s.\n' "${TUN_CONFIG##*/}"
+    if ! start_tun_stack; then
+        printf 'eta0 did not become ready.\n' >&2
+        exit 1
+    fi
+fi
+
+if ((TETHER_MODE)); then
+    if [[ "$transport_kind" == direct ]]; then
+        if ! start_tether_proxy; then
+            printf 'Hotspot/USB transparent listener did not start.\n' >&2
+            exit 1
+        fi
+        printf 'Tether bridge: HTTPS, DoT, and DNS on hotspot/USB.\n'
+    else
+        printf 'Tether bridge requires direct transport; hotspot/USB left unchanged.\n' >&2
+    fi
+fi
+
+if ! install_packet_policy; then
+    printf 'Unable to install application TCP routing.\n' >&2
+    exit 1
+fi
+
+if [[ "$transport_kind" == direct ]] && ! flush_android_dns_cache; then
+    printf 'Warning: Android DNS cache flush failed; stale answers expire normally.\n' >&2
+fi
+
+if ! restart_target_apps; then
+    printf 'Warning: target app restart failed; reopen it manually.\n' >&2
+fi
+
+watchdog_available=0
+if resolve_watchdog_uid; then
+    watchdog_available=1
+elif ((WATCHDOG_INTERVAL > 0)); then
+    printf 'Warning: Termux UID unavailable; app-path watchdog disabled.\n' >&2
+    WATCHDOG_INTERVAL=0
+fi
+
+if ((watchdog_available)) && ! watchdog_check; then
+    if [[ "$transport_kind" == direct && "$direct_stack" == nfqueue && "$DIRECT_STACK" == auto ]] && ((tun_available)); then
+        printf 'Initial NFQUEUE check failed; switching to TUN fallback.\n' >&2
+        mark_nfq_cooldown || true
+        clear_packet_policy || exit 1
+        stop_nfq || exit 1
+        direct_stack=tun
+        printf 'TUN profile: %s.\n' "${TUN_CONFIG##*/}"
+        start_tun_stack || exit 1
+        install_packet_policy || exit 1
+        if ! watchdog_check; then
+            printf 'Initial TUN fallback check failed.\n' >&2
+            exit 1
+        fi
+    else
+        printf 'Initial app-path health check failed.\n' >&2
+        exit 1
+    fi
+fi
+
+if [[ "$transport_kind" == direct && "$direct_stack" == nfqueue ]]; then
+    if switch_direct_dns_to_nfq; then
+        printf 'DNS path: direct DoH through NFQUEUE; local SOCKS layer stopped.\n'
+        if ((watchdog_available)) && ! watchdog_check; then
+            printf 'Direct DoH validation failed; restoring SOCKS DNS fallback.\n' >&2
+            start_direct_transport || exit 1
+            watchdog_check || exit 1
+        fi
+    else
+        printf 'Direct DoH did not become ready; keeping SOCKS DNS fallback.\n' >&2
+    fi
+fi
+
+if ! publish_health; then
+    printf 'Unable to publish app-path liveness.\n' >&2
+    exit 1
+fi
+
+stack_tmp="${STACK_FILE}.tmp.$$"
+ready_tmp="${READY_FILE}.tmp.$$"
+if ! printf '%s\n' "$direct_stack" >"$stack_tmp" || ! mv -f "$stack_tmp" "$STACK_FILE" || \
+   ! printf '%s\n' "$$" >"$ready_tmp" || ! mv -f "$ready_tmp" "$READY_FILE"; then
+    rm -f "$stack_tmp" "$ready_tmp"
+    printf 'Unable to publish eta-net readiness.\n' >&2
+    exit 1
+fi
+
+if [[ "$ROUTE_ALL_APPS" == 1 ]]; then
+    printf 'All application TCP uses the %s data stack.\n' "$direct_stack"
+else
+    printf 'Target application TCP uses the %s data stack.\n' "$direct_stack"
+fi
+if [[ "$ROUTE_SYSTEM_DNS" == 1 && "$transport_kind" == direct ]]; then
+    printf 'Android DNS uses local DoH. QUIC falls back to TCP; other UDP stays direct.\n'
+elif [[ "$ROUTE_SYSTEM_DNS" == 1 ]]; then
+    printf 'Android DNS uses the server. QUIC falls back to TCP; other UDP stays direct.\n'
+else
+    printf 'Target raw DNS uses the server; Android system DNS stays direct. QUIC falls back to TCP; other UDP stays direct.\n'
+fi
+printf 'Keep Termux open; Ctrl+C stops.\n'
+
+watchdog_elapsed=0
+watchdog_failure_count=0
+while { [[ -z "$transport_pid" ]] || child_is_live "$transport_pid"; } && \
+      { [[ -z "$dns_proxy_pid" ]] || child_is_live "$dns_proxy_pid"; } && \
+      data_stack_is_live; do
+    sleep 5
+    if ((WATCHDOG_INTERVAL > 0)); then
+        ((watchdog_elapsed += 5))
+        if ((watchdog_elapsed >= WATCHDOG_INTERVAL)); then
+            watchdog_elapsed=0
+            if watchdog_check; then
+                watchdog_failure_count=0
+                publish_health || {
+                    printf 'Unable to update app-path health.\n' >&2
+                    exit 1
+                }
+            else
+                ((watchdog_failure_count++))
+                printf 'App-path watchdog failure %s/%s.\n' \
+                    "$watchdog_failure_count" "$WATCHDOG_FAILURES" >&2
+                if ((watchdog_failure_count >= WATCHDOG_FAILURES)); then
+                    if [[ "$direct_stack" == nfqueue && "$DIRECT_STACK" == auto ]]; then
+                        mark_nfq_cooldown || true
+                        printf 'NFQUEUE cooldown requested; next start uses TUN fallback.\n' >&2
+                    fi
+                    printf 'App-path watchdog requested restart.\n' >&2
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+done
+if [[ "$direct_stack" == nfqueue && "$DIRECT_STACK" == auto ]]; then
+    mark_nfq_cooldown || true
+    printf 'NFQUEUE component stopped; next start uses TUN fallback.\n' >&2
+fi
+printf 'An eta-net component stopped.\n' >&2
+exit 1

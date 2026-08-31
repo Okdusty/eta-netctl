@@ -1,0 +1,224 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+ETA_ROOT=/data/adb/eta-net
+STATE_DIR="$ETA_ROOT/state"
+LOCK_FILE="$STATE_DIR/eta-net.lock/pid"
+READY_FILE="$STATE_DIR/eta-net.ready"
+HEALTH_FILE="$STATE_DIR/eta-net.health"
+STACK_FILE="$STATE_DIR/eta-net.stack"
+NFQ_PID_FILE=/data/local/tmp/eta-nfq.pid
+TETHER_PID_FILE=/data/local/tmp/eta-tether.pid
+NFQ_QUEUE=220
+HEARTBEAT_FILE="$ETA_ROOT/supervisor.heartbeat"
+ARGS_FILE="$ETA_ROOT/args"
+LOG_FILE="$ETA_ROOT/eta-net.log"
+PREVIOUS_LOG="$ETA_ROOT/eta-net.previous.log"
+DISABLE_FILE="$ETA_ROOT/disabled"
+
+usage() {
+    printf '%s\n' \
+        'usage: eta-netctl start [eta-net options]' \
+        '       eta-netctl stop|restart [eta-net options]|reset|status|logs [current|previous]|enable|disable'
+}
+
+eta_state_snapshot() {
+    su -c "
+        now=\$(date +%s)
+        heartbeat=\$(cat '$HEARTBEAT_FILE' 2>/dev/null)
+        case \"\$heartbeat\" in *[!0-9]*|'') echo supervisor-stopped; exit ;; esac
+        if test \$((now - heartbeat)) -gt 10; then echo supervisor-stopped; exit; fi
+        pid=\$(cat '$LOCK_FILE' 2>/dev/null)
+        ready=\$(cat '$READY_FILE' 2>/dev/null)
+        tether_pid=\$(cat '$TETHER_PID_FILE' 2>/dev/null)
+        tether_live=0
+        case \"\$tether_pid\" in *[!0-9]*|'') ;; *) kill -0 \$tether_pid 2>/dev/null && tether_live=1 ;; esac
+        case \"\$pid\" in
+        *[!0-9]*|'')
+            nfq_pid=\$(cat '$NFQ_PID_FILE' 2>/dev/null)
+            if test -d /sys/class/net/eta0 || grep -Eq \"^[[:space:]]*${NFQ_QUEUE}[[:space:]]+\$nfq_pid[[:space:]]\" /proc/net/netfilter/nfnetlink_queue || test \$tether_live -eq 1; then echo orphan
+            elif test -e '$DISABLE_FILE'; then echo disabled
+            else echo waiting
+            fi
+            exit
+            ;;
+        esac
+        if ! kill -0 \$pid 2>/dev/null; then
+            nfq_pid=\$(cat '$NFQ_PID_FILE' 2>/dev/null)
+            if test -d /sys/class/net/eta0 || grep -Eq \"^[[:space:]]*${NFQ_QUEUE}[[:space:]]+\$nfq_pid[[:space:]]\" /proc/net/netfilter/nfnetlink_queue || test \$tether_live -eq 1; then echo orphan; else echo waiting; fi
+            exit
+        fi
+        stack=\$(cat '$STACK_FILE' 2>/dev/null)
+        stack_ok=0
+        if test \"\$stack\" = nfqueue; then
+            nfq_pid=\$(cat '$NFQ_PID_FILE' 2>/dev/null)
+            case \"\$nfq_pid\" in *[!0-9]*|'') ;; *)
+                if grep -Eq \"^[[:space:]]*${NFQ_QUEUE}[[:space:]]+\$nfq_pid[[:space:]]\" /proc/net/netfilter/nfnetlink_queue; then
+                    stack_ok=1
+                fi
+                ;;
+            esac
+        elif test \"\$stack\" = tun && test -d /sys/class/net/eta0; then
+            stack_ok=1
+        fi
+        if test -s '$TETHER_PID_FILE' && test \$tether_live -ne 1; then
+            stack_ok=0
+        fi
+        if test \"\$ready\" != \"\$pid\" || test \"\$stack_ok\" -ne 1; then
+            echo starting
+            exit
+        fi
+        set -- \$(cat '$HEALTH_FILE' 2>/dev/null)
+        epoch=\${1:-}
+        interval=\${2:-}
+        case \"\$epoch:\$interval\" in *[!0-9:]*|:|*:) echo degraded; exit ;; esac
+        if test \"\$interval\" -eq 0 || { test \"\$now\" -ge \"\$epoch\" && test \$((now - epoch)) -le \$((interval + 30)); }; then
+            echo healthy
+        else
+            echo degraded
+        fi
+    " 2>/dev/null | tr -d '\r\n'
+}
+
+show_status() {
+    case "$(eta_state_snapshot)" in
+    healthy)
+        eta_stack=$(su -c "cat '$STACK_FILE' 2>/dev/null" | tr -d '\r\n')
+        printf 'eta-net active, %s app path healthy\n' "${eta_stack:-unknown}"
+        return 0
+        ;;
+    degraded)
+        printf 'eta-net degraded, watchdog health is stale\n'
+        ;;
+    starting)
+        printf 'eta-net starting\n'
+        return 0
+        ;;
+    disabled) printf 'eta-net disabled\n' ;;
+    waiting) printf 'eta-net waiting for cellular network\n' ;;
+    orphan) printf 'eta-net stale data-stack owner detected\n' ;;
+    *) printf 'eta-net supervisor stopped\n' ;;
+    esac
+    return 1
+}
+
+show_logs() {
+    local eta_log_file eta_log_lines=${ETA_LOG_LINES:-80}
+    [[ "$eta_log_lines" =~ ^[0-9]+$ ]] && ((eta_log_lines >= 1 && eta_log_lines <= 10000)) || {
+        printf 'ETA_LOG_LINES must be between 1 and 10000\n' >&2
+        return 2
+    }
+    case "${1:-current}" in
+    current) eta_log_file=$LOG_FILE ;;
+    previous) eta_log_file=$PREVIOUS_LOG ;;
+    *)
+        printf 'usage: eta-netctl logs [current|previous]\n' >&2
+        return 2
+        ;;
+    esac
+    su -c "tail -n ${eta_log_lines} '$eta_log_file'" 2>/dev/null || true
+}
+
+write_args() {
+    local eta_arg eta_command eta_args_tmp="${ARGS_FILE}.tmp.$$"
+    (($# > 0)) || return 0
+    eta_command="umask 077; : >'$eta_args_tmp'; "
+    for eta_arg in "$@"; do
+        [[ "$eta_arg" != *$'\n'* ]] || {
+            printf 'Arguments may not contain newlines\n' >&2
+            return 2
+        }
+        printf -v eta_arg '%q' "$eta_arg"
+        eta_command+="printf '%s\\n' $eta_arg >>'$eta_args_tmp'; "
+    done
+    eta_command+="mv -f '$eta_args_tmp' '$ARGS_FILE'"
+    su -c "$eta_command" || {
+        su -c "rm -f '$eta_args_tmp'" >/dev/null 2>&1 || true
+        return 1
+    }
+}
+
+clear_args() {
+    su -c "rm -f '$ARGS_FILE'"
+}
+
+start_eta_net() {
+    local eta_misses=0 eta_state eta_wait
+    eta_state=$(eta_state_snapshot)
+    [[ "$eta_state" != supervisor-stopped ]] || {
+        printf 'eta-net boot supervisor is not running; reboot once after installation\n' >&2
+        return 1
+    }
+    if (($# > 0)) && [[ "$eta_state" =~ ^(healthy|degraded)$ ]]; then
+        printf 'eta-net is active; use eta-netctl restart with new options\n' >&2
+        return 2
+    fi
+    write_args "$@" || return
+    su -c "rm -f '$DISABLE_FILE'" || return 1
+    for ((eta_wait = 0; eta_wait < 90; eta_wait++)); do
+        eta_state=$(eta_state_snapshot)
+        if [[ "$eta_state" == healthy ]]; then
+            eta_stack=$(su -c "cat '$STACK_FILE' 2>/dev/null" | tr -d '\r\n')
+            printf 'eta-net active, %s app path healthy\n' "${eta_stack:-unknown}"
+            return 0
+        fi
+        if [[ "$eta_state" == supervisor-stopped ]]; then
+            ((eta_misses++))
+            ((eta_misses < 10)) || break
+        else
+            eta_misses=0
+        fi
+        sleep 0.5
+    done
+    printf 'eta-net failed to become ready; recent log:\n' >&2
+    su -c "tail -n 40 '$LOG_FILE'" >&2 || true
+    return 1
+}
+
+stop_eta_net() {
+    local eta_state eta_wait
+    su -c "mkdir -p '$ETA_ROOT'; touch '$DISABLE_FILE'" || return 1
+    for ((eta_wait = 0; eta_wait < 80; eta_wait++)); do
+        eta_state=$(eta_state_snapshot)
+        if [[ "$eta_state" == disabled ]]; then
+            printf 'eta-net stopped\n'
+            return 0
+        fi
+        sleep 0.5
+    done
+    printf 'eta-net did not stop cleanly\n' >&2
+    return 1
+}
+
+command=${1:-status}
+shift || true
+case "$command" in
+start|enable)
+    start_eta_net "$@"
+    ;;
+stop|disable)
+    stop_eta_net
+    ;;
+restart)
+    if (($# > 0)); then
+        write_args "$@" || exit
+    fi
+    stop_eta_net && start_eta_net
+    ;;
+reset)
+    stop_eta_net && clear_args && start_eta_net
+    ;;
+status)
+    show_status
+    ;;
+logs)
+    show_logs "${1:-current}"
+    ;;
+-h|--help|help)
+    usage
+    ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac
